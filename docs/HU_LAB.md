@@ -17,6 +17,8 @@ brew install libusb
 python -m hu_lab --help
 ```
 
+On Ubuntu/Debian, install the system libraries separately: `sudo apt-get install libusb-1.0-0 libegl1 libgl1 libxkbcommon0`. Headless CI still imports Qt for mouse/geometry regression tests.
+
 Dependencies: PySide6 for the window, PyAV for H.264 decoding, Pillow for saved frame images, and a system libusb 1.0 library for native USB. None is installed on Android by these commands. The included tests also use PyAV's libx264 encoder to generate anonymous test pictures; private screen recordings are unnecessary.
 
 ## Native USB
