@@ -1,0 +1,14 @@
+#!/system/bin/sh
+# Non-USB selector broker, queued by init until the default APEX namespace exists.
+PATH=/system/bin:/system/xbin:/vendor/bin
+export PATH
+unset ASH_STANDALONE
+umask 077
+S=/data/adb/carlife-boot
+b() { timeout -k 1 2 "$@"; }
+[ -d "$S" ] && [ ! -L "$S" ] && [ "$(b stat -c '%u:%g:%a' "$S")" = 0:0:700 ] || exit 70
+[ -f "$S/selector-daemon.sh" ] && [ ! -L "$S/selector-daemon.sh" ] || exit 70
+[ "$(b stat -c '%u:%g:%a' "$S/selector-daemon.sh")" = 0:0:500 ] || exit 70
+h=$(b sha256sum "$S/selector-daemon.sh") || exit 70
+[ "${h%% *}" = @SELECTOR_SHA@ ] || exit 70
+exec /system/bin/sh "$S/selector-daemon.sh"

@@ -1,0 +1,55 @@
+name: Offline source checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-and-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Standard-library HU tests
+        run: python scripts/test_host.py --stdlib-only
+      - name: Runtime and observer regressions
+        run: python -m unittest discover -s tests -p 'test_boot_native_*.py'
+      - name: Saved selector tests
+        run: python -m unittest discover -s tools/boot_native/selector/tests -p 'test_*.py'
+      - name: System provisioning against synthetic fixtures
+        run: python -m unittest integration.sm6350.test_system_integration
+      - name: Documentation links and publication hygiene
+        run: python scripts/check_publication.py
+  media:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements-hu.txt
+      - run: python scripts/test_host.py
+  android-md:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Compile and run the 26 JVM suites
+        run: python scripts/build_md.py --test-only --android-jar "$ANDROID_HOME/platforms/android-35/android.jar"

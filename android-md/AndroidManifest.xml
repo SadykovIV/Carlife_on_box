@@ -1,0 +1,9 @@
+<!-- Source view of the fixed binary manifest emitted by manifest_binary.py. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.carlife.hulab.stimulus" android:versionCode="1" android:versionName="1.0">
+  <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="35"/>
+  <application android:label="CarLife HU Lab Stimulus" android:hasCode="true" android:allowBackup="false" android:enableOnBackInvokedCallback="false">
+    <activity android:name=".MainActivity" android:exported="true" android:resizeableActivity="true" android:screenOrientation="landscape" android:configChanges="orientation|screenSize">
+      <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+    </activity>
+  </application>
+</manifest>

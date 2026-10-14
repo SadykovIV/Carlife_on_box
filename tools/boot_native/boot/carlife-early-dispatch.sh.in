@@ -1,0 +1,124 @@
+#!/system/bin/sh
+# BOOT_NATIVE_V1. This is a child service, never a blocking init exec action.
+# No USB changes, OEM property writes, ADB, framework or network prerequisites.
+PATH=/system/bin:/system/xbin:/vendor/bin
+export PATH
+unset ASH_STANDALONE
+umask 077
+S=/data/adb/carlife-boot
+OEM=/system/bin/sd-reverse.sh
+OEM_SHA=@OEM_SHA@
+RUNTIME=/data/local/carlife-native/runtime-control.sh
+RUNTIME_SHA=@RUNTIME_SHA@
+LOGDIR=/dev/carlife-native-boot
+PERSIST_LOG=
+LAST_EVENT=
+EVENT_COUNT=0
+b() { timeout -k 1 2 "$@"; }
+meta() { b stat -c '%u:%g:%a' "$1"; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ] && [ "$(meta "$1")" = "0:0:$2" ]; }
+directory() { [ -d "$1" ] && [ ! -L "$1" ] && [ "$(meta "$1")" = "0:0:$2" ]; }
+hash_is() { he=$(b sha256sum "$1") || return 1; [ "${he%% *}" = "$2" ]; }
+oem_file_ok() { [ -f "$OEM" ] && [ ! -L "$OEM" ] && [ "$(meta "$OEM")" = 0:2000:755 ] && hash_is "$OEM" "$OEM_SHA"; }
+exact_lf() {
+    xl=$(b cat "$1" && printf '.') || return 1
+    [ "$xl" = "$(printf '%s\n.' "$2")" ] && [ "$(b stat -c %s "$1")" = "$((${#2}+1))" ]
+}
+read_selection() {
+    # Do not cross a partially committed selector transaction or delete its lock.
+    [ ! -e "$S/.selector-lock" ] && [ ! -L "$S/.selector-lock" ] || return 10
+    [ -e "$S/schema" ] || { [ ! -L "$S/schema" ] && return 10; return 11; }
+    regular "$S/schema" 600 && exact_lf "$S/schema" 1 || return 11
+    [ -e "$S/selected" ] || { [ ! -L "$S/selected" ] && return 10; return 11; }
+    regular "$S/selected" 600 || return 11
+    selected=$(b cat "$S/selected") || return 11
+    case "$selected" in android_auto|carplay|carlife) ;; *) return 11;; esac
+    exact_lf "$S/selected" "$selected" || return 11
+    [ ! -e "$S/.selector-lock" ] && [ ! -L "$S/.selector-lock" ] || return 10
+}
+park() { while :; do sleep 60; done; }
+event() {
+    [ "$1" != "$LAST_EVENT" ] && [ "$EVENT_COUNT" -lt 48 ] || return 0
+    LAST_EVENT=$1; EVENT_COUNT=$((EVENT_COUNT+1))
+    read tick rest < /proc/uptime || tick=unknown
+    row="BOOT_NATIVE_V1 boot=$BOOT pid=$$ uptime=$tick phase=$1"
+    printf '%s\n' "$row" >> "$LOGDIR/trace" || return 1
+    if [ -n "$PERSIST_LOG" ]; then printf '%s\n' "$row" >> "$PERSIST_LOG" || return 1; fi
+}
+persist_trace() {
+    directory "$S/logs" 700 || return 1
+    for old_log in "$S/logs/early.current" "$S/logs/early.previous"; do
+        if [ -e "$old_log" ] || [ -L "$old_log" ]; then regular "$old_log" 600 || return 1; fi
+    done
+    log_tmp=$S/logs/early.$BOOT.$$.tmp
+    (set -C; cat "$LOGDIR/trace" > "$log_tmp") || return 1
+    regular "$log_tmp" 600 || return 1
+    if [ -e "$S/logs/early.current" ]; then mv -f "$S/logs/early.current" "$S/logs/early.previous" || return 1; fi
+    mv "$log_tmp" "$S/logs/early.current" || return 1
+    PERSIST_LOG=$S/logs/early.current
+}
+BOOT=$(b cat /proc/sys/kernel/random/boot_id) || exit 70
+case "$BOOT" in ''|*[!a-f0-9-]*) exit 70;; esac
+[ "${#BOOT}" = 36 ] || exit 70
+# init serializes the one sd-reverse service. A prior same-boot trace is retained
+# on a process restart, never removed or mistaken for a current owner.
+if [ ! -e "$LOGDIR" ]; then mkdir -m 700 "$LOGDIR" || exit 70; fi
+directory "$LOGDIR" 700 || exit 70
+if [ -e "$LOGDIR/trace" ] || [ -L "$LOGDIR/trace" ]; then
+    regular "$LOGDIR/trace" 600 || exit 70
+    old_size=$(b stat -c %s "$LOGDIR/trace") || exit 70
+    case "$old_size" in ''|*[!0-9]*) exit 70;; esac
+    [ "$old_size" -lt 16384 ] || park
+else
+    (set -C; : > "$LOGDIR/trace") || exit 70
+fi
+event BOOTSTRAP || park
+while :; do
+    # /data/adb is device-encrypted storage. Absence is pending, never AA.
+    if [ ! -e /data/adb ] || [ ! -e "$S" ]; then
+        event SELECTION_PENDING; sleep 1; continue
+    fi
+    directory /data/adb 700 && directory "$S" 700 || { event SELECTION_STORE_REFUSED; park; }
+    [ -n "$PERSIST_LOG" ] || persist_trace || { event LOG_STORE_REFUSED; park; }
+    if [ -e "$S/.selector-lock" ] || [ -L "$S/.selector-lock" ]; then
+        event SELECTION_TRANSACTION_PENDING; sleep 1; continue
+    fi
+    if [ -e "$S/disabled" ] || [ -L "$S/disabled" ]; then
+        regular "$S/disabled" 600 && [ ! -s "$S/disabled" ] || { event DISABLE_MARKER_REFUSED; park; }
+        # Explicit maintenance disable restores the exact OEM selector branch.
+        [ "$(b getprop ro.persistent_properties.ready)" = true ] || { event OEM_PROPERTIES_PENDING; sleep 1; continue; }
+        event EXPLICIT_OEM_BYPASS
+        oem_file_ok || { event OEM_PIN_REFUSED; park; }
+        exec "$OEM"
+    fi
+    read_selection; selection_rc=$?
+    case "$selection_rc" in 0) ;; 10) event SELECTION_PENDING; sleep 1; continue;; *) event SELECTION_FILE_REFUSED; park;; esac
+    case "$selected" in
+        android_auto|carplay)
+            # The selector transaction owns reconciliation; unknown cp_aa never
+            # falls through to the OEM shell's implicit CarPlay branch here.
+            mode=$(b cat /sys/devices/platform/soc/soc:qpdata_driver/cp_aa) || { event OEM_MODE_READ_ERROR; sleep 1; continue; }
+            case "$selected:$mode" in android_auto:2000|carplay:1000) ;; *) event SELECTION_MISMATCH; park;; esac
+            # OEM itself consumes persist.*; do not let an early empty property
+            # silently choose its alternate branch. This gate is OEM-only.
+            [ "$(b getprop ro.persistent_properties.ready)" = true ] || { event OEM_PROPERTIES_PENDING; sleep 1; continue; }
+            oem_file_ok || { event OEM_PIN_REFUSED; park; }
+            event "SELECTED_$selected" || park
+            exec "$OEM"
+            ;;
+        carlife)
+            # A staged previous late-start pilot must not become a second owner.
+            if [ -d /data/adb/modules/carlife_native_pilot_v3 ]; then
+                regular /data/adb/modules/carlife_native_pilot_v3/disable 644 && [ ! -s /data/adb/modules/carlife_native_pilot_v3/disable ] || { event OLD_LATE_HOOK_ENABLED; park; }
+            fi
+            directory /data/local/carlife-native 700 && regular "$RUNTIME" 500 && hash_is "$RUNTIME" "$RUNTIME_SHA" || { event RUNTIME_PIN_REFUSED; park; }
+            event SELECTED_carlife || park
+            # Exactly one init request. Queued by "updatable" until the default
+            # APEX namespace is ready; no polling starts or automatic OEM return.
+            b start carlife-native || { event NATIVE_START_REQUEST_FAILED; park; }
+            event NATIVE_START_REQUESTED
+            park
+            ;;
+        *) event SELECTION_INVALID; sleep 1;;
+    esac
+done

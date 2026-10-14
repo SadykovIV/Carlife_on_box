@@ -1,0 +1,143 @@
+#!/system/bin/sh
+# CARLIFE_SYSTEM_SEED_V1. init post-fs-data child; no projection/USB/ADB actions.
+set -u
+umask 077
+PATH=/system/bin:/system/xbin:/vendor/bin
+export PATH
+unset ENV BASH_ENV ASH_STANDALONE
+B=/system/etc/carlife
+P=/data/local/carlife-native
+S=/data/adb/carlife-boot
+PTMP=; STMP=
+b() { timeout -k 1 4 "$@"; }
+meta() { b stat -c '%u:%g:%a' "$1"; }
+dir() { [ -d "$1" ] && [ ! -L "$1" ] && [ "$(b readlink -f "$1")" = "$1" ] && [ "$(meta "$1")" = "0:0:$2" ]; }
+file() { [ -f "$1" ] && [ ! -L "$1" ] && [ "$(meta "$1")" = "0:0:$2" ]; }
+hash_is() { hs=$(b sha256sum "$1") || return 1; [ "${hs%% *}" = "$2" ]; }
+exact_lf() {
+    xl=$(b cat "$1" && printf '.') || return 1
+    [ "$xl" = "$(printf '%s\n.' "$2")" ] && [ "$(b stat -c %s "$1")" = "$((${#2}+1))" ]
+}
+fail() { printf 'CARLIFE_SYSTEM_SEED_FAIL=%s\n' "$1" >&2; exit 70; }
+old_pilot_safe() {
+    old=/data/adb/modules/carlife_native_pilot_v3
+    if [ -e "$old" ] || [ -L "$old" ]; then
+        [ -d "$old" ] && [ ! -L "$old" ] && [ "$(b readlink -f "$old")" = "$old" ] || return 1
+        file "$old/disable" 644 && [ "$(b stat -c %s "$old/disable")" = 0 ] || return 1
+    fi
+}
+verify_runtime() {
+    vr=$1
+@VERIFY_RUNTIME@
+}
+verify_runtime_before_migration() {
+    vr=$1
+@VERIFY_RUNTIME_BEFORE_MIGRATION@
+}
+verify_selector() {
+    vs=$1
+    dir "$vs" 700 && dir "$vs/logs" 700 || return 1
+@VERIFY_SELECTOR@
+    [ ! -e "$vs/.selector-lock" ] && [ ! -L "$vs/.selector-lock" ] || return 1
+    file "$vs/schema" 600 && exact_lf "$vs/schema" 1 || return 1
+    file "$vs/selected" 600 || return 1
+    choice=$(b cat "$vs/selected") || return 1
+    case "$choice" in android_auto|carplay|carlife) ;; *) return 1;; esac
+    exact_lf "$vs/selected" "$choice" || return 1
+    if [ -e "$vs/disabled" ] || [ -L "$vs/disabled" ]; then file "$vs/disabled" 600 && [ "$(b stat -c %s "$vs/disabled")" = 0 ] || return 1; fi
+}
+no_live_native_owner() {
+    if [ -e "$P/runtime/owner.lock" ] || [ -L "$P/runtime/owner.lock" ]; then
+        dir "$P/runtime/owner.lock" 700 && file "$P/runtime/boot" 600 || return 1
+        lock_entries=$(b ls -A "$P/runtime/owner.lock") || return 1
+        [ -z "$lock_entries" ] || return 1
+        prior_boot=$(b cat "$P/runtime/boot") || return 1
+        case "$prior_boot" in ''|*[!a-f0-9-]*) return 1;; esac
+        [ "${#prior_boot}" = 36 ] && [ "$prior_boot" != "$BOOT" ] || return 1
+        # Preserve the old lock/evidence. The unchanged controller claim_owner
+        # consumes its own empty prior-boot lock after data_ready, not here.
+    fi
+    live=$(b ps -A -o PID,ARGS) || return 1
+    case "$live" in
+        *'org.carlife.hulab.MdMain'*|*'runtime-controller.sh run '*|*'persistent-controller.sh run '*|*'/data/local/carlife-native/versions/boot-native-v1-20261014/uevent-watch '*) return 1;;
+    esac
+    ready=$(b getprop sys.carlife.data_ready) || return 1
+    case "$ready" in ''|0) ;; *) return 1;; esac
+}
+migrate_known_resolver() {
+    # Only the new system provision executes this before publishing data_ready.
+    # All other runtime and selector bytes must already match this system seed.
+    verify_runtime_before_migration "$P" && verify_selector "$S" && old_pilot_safe && no_live_native_owner || fail existing_runtime_mismatch_preserved
+    file "$B/runtime-seed/runtime-control.sh" 644 && hash_is "$B/runtime-seed/runtime-control.sh" @NEW_RESOLVER_SHA@ || fail resolver_seed
+    MIG=$P/.resolver-migration.$BOOT.$$
+    [ ! -e "$MIG" ] && [ ! -L "$MIG" ] || fail resolver_migration_exists
+    b mkdir -m 700 "$MIG" || fail resolver_backup_directory
+    b cp -p "$P/runtime-control.sh" "$MIG/old-runtime-control.sh" || fail resolver_backup_copy
+    file "$MIG/old-runtime-control.sh" 500 && hash_is "$MIG/old-runtime-control.sh" @OLD_RESOLVER_SHA@ || fail resolver_backup_verify
+    (set -C; printf 'contract=CARLIFE_RESOLVER_MIGRATION_V1\nboot=%s\nsource=@OLD_RESOLVER_SHA@\ntarget=@NEW_RESOLVER_SHA@\n' "$BOOT" > "$MIG/receipt") || fail resolver_receipt
+    b cp "$B/runtime-seed/runtime-control.sh" "$MIG/new-runtime-control.sh" && b chmod 500 "$MIG/new-runtime-control.sh" && b chown 0:0 "$MIG/new-runtime-control.sh" || fail resolver_stage
+    file "$MIG/new-runtime-control.sh" 500 && hash_is "$MIG/new-runtime-control.sh" @NEW_RESOLVER_SHA@ || fail resolver_stage_verify
+    b sync || fail resolver_backup_sync
+    verify_runtime_before_migration "$P" && verify_selector "$S" && old_pilot_safe && no_live_native_owner || fail resolver_prepublication_drift
+    # Same filesystem rename, old or new complete file; no data/root reset.
+    b mv "$MIG/new-runtime-control.sh" "$P/runtime-control.sh" || fail resolver_publish
+    b restorecon "$P/runtime-control.sh" && verify_runtime "$P" && b sync || fail resolver_after_publish
+    (set -C; printf 'sha256=@NEW_RESOLVER_SHA@\n' > "$MIG/COMMITTED") && b sync || fail resolver_commit
+    printf 'CARLIFE_RESOLVER_MIGRATED=%s\n' "$MIG"
+}
+
+[ "$(b id -u)" = 0 ] && [ "$(b id -g)" = 0 ] || fail root_required
+# Only the post-fs-data init action starts this service. Refuse an unmounted /data.
+b awk '$2 == "/data" { found=1 } END { exit !found }' /proc/mounts || fail data_not_mounted
+[ -d /data ] && [ ! -L /data ] && [ "$(b readlink -f /data)" = /data ] || fail data_path
+if [ ! -e /data/local ] && [ ! -L /data/local ]; then b mkdir -m 751 /data/local && b chown 0:2000 /data/local || fail data_local_create; fi
+[ -d /data/local ] && [ ! -L /data/local ] && [ "$(b readlink -f /data/local)" = /data/local ] || fail data_local_path
+if [ ! -e /data/adb ] && [ ! -L /data/adb ]; then b mkdir -m 700 /data/adb && b chown 0:0 /data/adb || fail data_adb_create; fi
+dir /data/adb 700 || fail data_adb_metadata
+old_pilot_safe || fail existing_late_pilot_not_disabled
+BOOT=$(b cat /proc/sys/kernel/random/boot_id) || fail boot_read
+case "$BOOT" in ''|*[!a-f0-9-]*) fail boot_shape;; esac
+[ "${#BOOT}" = 36 ] || fail boot_shape
+
+# Existing populated roots are verified and preserved, including saved selection,
+# logs, runtime identity/locks and diagnostic disabled marker. Never auto-upgrade.
+if [ -e "$P" ] || [ -L "$P" ]; then
+    if verify_runtime "$P"; then
+        # Also completes path-context restoration after a power loss following
+        # the atomic resolver rename but before the migration receipt commit.
+        b restorecon "$P/runtime-control.sh" || fail runtime_resolver_context
+    else migrate_known_resolver; fi
+else
+    PTMP=/data/local/.carlife-native-seed.$BOOT.$$
+    [ ! -e "$PTMP" ] && [ ! -L "$PTMP" ] || fail runtime_stage_exists
+    b mkdir -m 700 "$PTMP" || fail runtime_stage_create
+@COPY_RUNTIME@
+    verify_runtime "$PTMP" || fail runtime_stage_verify
+    b sync || fail sync_before_runtime_publish
+    [ ! -e "$P" ] && [ ! -L "$P" ] || fail runtime_publish_race
+    b mv "$PTMP" "$P" || fail runtime_publish
+    PTMP=
+    b restorecon -RF "$P" || fail runtime_restorecon
+fi
+
+if [ -e "$S" ] || [ -L "$S" ]; then
+    verify_selector "$S" || fail existing_selector_mismatch_preserved
+else
+    # Explicit image build selection. No inferred CarPlay/AA fallback or AT write.
+@DEFAULT_SELECTION_GATE@
+    STMP=/data/adb/.carlife-boot-seed.$BOOT.$$
+    [ ! -e "$STMP" ] && [ ! -L "$STMP" ] || fail selector_stage_exists
+    b mkdir -m 700 "$STMP" && b mkdir -m 700 "$STMP/logs" || fail selector_stage_create
+@COPY_SELECTOR@
+    verify_selector "$STMP" || fail selector_stage_verify
+    b sync || fail sync_before_selector_publish
+    [ ! -e "$S" ] && [ ! -L "$S" ] || fail selector_publish_race
+    b mv "$STMP" "$S" || fail selector_publish
+    STMP=
+    b restorecon -RF "$S" || fail selector_restorecon
+fi
+verify_runtime "$P" && verify_selector "$S" && old_pilot_safe || fail final_verify
+b sync || fail final_sync
+# Only own readiness marker, never sys.usb/persist/ctl properties.
+b setprop sys.carlife.data_ready 1 || fail readiness_publish
+printf 'CARLIFE_SYSTEM_SEED_READY=1\n'

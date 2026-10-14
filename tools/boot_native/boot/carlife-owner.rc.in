@@ -1,0 +1,45 @@
+# BOOT_NATIVE_V1: appended by pinned Magisk pre-init before init parses actions.
+# The original early-init "start sd-reverse" resolves this last definition.
+service sd-reverse /system/bin/sh ${MAGISKTMP}/carlife-early-dispatch.sh
+    override
+    class core
+    disabled
+    user root
+    group root
+    seclabel u:r:init:s0
+
+# ART must execute in the default APEX namespace, not sd-reverse's permanently
+# remembered bootstrap namespace. init queues this start until APEX readiness.
+service carlife-native /system/bin/sh ${MAGISKTMP}/carlife-native-entry.sh
+    class core
+    disabled
+    oneshot
+    updatable
+    user root
+    group root
+    seclabel u:r:init:s0
+
+# First event finishes after ALL boot actions, even when this file was parsed
+# before vendor rc. Then append one more event behind property events emitted
+# by those boot actions, including vendor.usb.controller -> configfs=1.
+on boot
+    trigger carlife-generic-usb-tail
+
+on carlife-generic-usb-tail
+    trigger carlife-usb-controller-tail
+
+on carlife-usb-controller-tail
+    setprop sys.carlife.usb_controller_ready ${vendor.usb.controller}
+    setprop sys.carlife.generic_usb_ready 1
+
+service carlife-selector /system/bin/sh ${MAGISKTMP}/carlife-selector-entry.sh
+    class late_start
+    disabled
+    oneshot
+    updatable
+    user root
+    group root
+    seclabel u:r:init:s0
+
+on post-fs-data
+    start carlife-selector

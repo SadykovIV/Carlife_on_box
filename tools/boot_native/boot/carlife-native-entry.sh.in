@@ -1,0 +1,28 @@
+#!/system/bin/sh
+# Runs only through disabled+updatable init service in default mount namespace.
+PATH=/system/bin:/system/xbin:/vendor/bin
+export PATH
+unset ASH_STANDALONE
+umask 077
+S=/data/adb/carlife-boot
+P=/data/local/carlife-native
+EXPECTED=@RUNTIME_SHA@
+b() { timeout -k 1 2 "$@"; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ] && [ "$(b stat -c '%u:%g:%a' "$1")" = "0:0:$2" ]; }
+exact_lf() {
+    xl=$(b cat "$1" && printf '.') || return 1
+    [ "$xl" = "$(printf '%s\n.' "$2")" ] && [ "$(b stat -c %s "$1")" = "$((${#2}+1))" ]
+}
+[ -d "$S" ] && [ ! -L "$S" ] && [ "$(b stat -c '%u:%g:%a' "$S")" = 0:0:700 ] || exit 70
+[ ! -e "$S/disabled" ] && [ ! -L "$S/disabled" ] || exit 70
+[ ! -e "$S/.selector-lock" ] && [ ! -L "$S/.selector-lock" ] || exit 70
+regular "$S/schema" 600 && exact_lf "$S/schema" 1 || exit 70
+regular "$S/selected" 600 && exact_lf "$S/selected" carlife || exit 70
+if [ -d /data/adb/modules/carlife_native_pilot_v3 ]; then
+    regular /data/adb/modules/carlife_native_pilot_v3/disable 644 && [ ! -s /data/adb/modules/carlife_native_pilot_v3/disable ] || exit 70
+fi
+[ -d "$P" ] && [ ! -L "$P" ] && [ "$(b stat -c '%u:%g:%a' "$P")" = 0:0:700 ] || exit 70
+regular "$P/runtime-control.sh" 500 || exit 70
+actual=$(b sha256sum "$P/runtime-control.sh") || exit 70
+[ "${actual%% *}" = "$EXPECTED" ] || exit 70
+exec /system/bin/sh "$P/runtime-control.sh" run-boot

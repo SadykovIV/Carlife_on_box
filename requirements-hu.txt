@@ -1,0 +1,4 @@
+# Optional native HU window and video decoder. Python 3.11+ recommended.
+PySide6==6.12.0
+av==18.1.0
+Pillow==12.3.0

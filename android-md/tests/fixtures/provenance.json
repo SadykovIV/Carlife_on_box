@@ -1,0 +1,77 @@
+{
+  "source": "independent libx264 encoder via PyAV, neutral host-only gray image; not Android display evidence",
+  "pyav_version": "18.1.0",
+  "ffmpeg_library_versions": {
+    "libavutil": [
+      60,
+      26,
+      102
+    ],
+    "libavcodec": [
+      62,
+      28,
+      102
+    ],
+    "libavformat": [
+      62,
+      12,
+      102
+    ],
+    "libavdevice": [
+      62,
+      3,
+      102
+    ],
+    "libavfilter": [
+      11,
+      14,
+      102
+    ],
+    "libswscale": [
+      9,
+      5,
+      102
+    ],
+    "libswresample": [
+      6,
+      3,
+      102
+    ]
+  },
+  "size": [
+    1280,
+    720
+  ],
+  "options": {},
+  "profile": "baseline",
+  "level": "3.1",
+  "nals": [
+    7,
+    8,
+    6,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5
+  ],
+  "files": {
+    "libx264-baseline31-vcl.h264": "59434c5e3f92a043be8fceea6008888f646164b367d0c3bd8d236bd402b00974",
+    "libx264-baseline31-au.h264": "2796fc489b2ecba61e0d8228a9ba6a93fdda6d0c86cc681ce43d51ccc9650d39",
+    "libx264-baseline31-csd.h264": "2724c53a7bbbe1a0888ed9453458d2da8ab6e62e5e4ab331925874d969c3d58f"
+  },
+  "requested_options": {
+    "profile": "baseline",
+    "level": "3.1",
+    "preset": "ultrafast",
+    "tune": "zerolatency",
+    "x264-params": "repeat-headers=1:keyint=60:min-keyint=60:scenecut=0"
+  },
+  "note": "PyAV codec.options after open may be empty because options were consumed; requested_options records actual inputs.",
+  "public_storage": "Each .h264.hex file contains ASCII hexadecimal for the original bytes. The files map records SHA256 of decoded bytes, not text. These are generated neutral-image fixtures, not captured device video."
+}
