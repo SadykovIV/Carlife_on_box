@@ -37,7 +37,7 @@ The full OTA and proprietary OEM applications are not distributed here. This rep
 
 ## Start here
 
-For a supported TBox Ultra 1, use the [Magisk installer guide](docs/MAGISK_INSTALLER.md) for installation, runtime updates and complete rollback without replacing the full firmware. The new installer is checked offline; hardware acceptance on a second box is still pending.
+For compatible TBox Ultra 1 firmware, the [Magisk installer](docs/MAGISK_INSTALLER.md) uses one ZIP and saves and patches each box's own boot during installation, without extracting it in advance or replacing the full firmware. Runtime updates and exact rollback are included. Offline checks pass; hardware acceptance on a second box is still pending.
 
 1. [Build the Android MD](docs/BUILD_MD.md) — shared source + native USB overlay, JVM tests and a DEX JAR.
 2. [Build the runtime and system overlay](docs/BUILD_RUNTIME.md) — observer, selector service and exact SM6350 integration.

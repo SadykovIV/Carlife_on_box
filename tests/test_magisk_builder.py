@@ -222,7 +222,7 @@ class PackageTests(unittest.TestCase):
         # and boot/ramdisk parser/repacker execute unmodified.
         self.original_reader = build.regular_bytes
         def reader(path, limit=b.LIMIT):
-            if path.parent == ROOT / 'tools/magisk' and path.name in build.SCRIPTS:
+            if path.parent == ROOT / 'tools/magisk' and path.name in build.SCRIPTS + ('patch-boot.sh',):
                 return b'#!/system/bin/sh\n# offline lifecycle fixture\nexit 0\n'
             return self.original_reader(path, limit)
         self.reader_patch = patch.object(build, 'regular_bytes', side_effect=reader)
@@ -348,6 +348,125 @@ class PackageTests(unittest.TestCase):
             archive.writestr('../outside', b'bad')
         with self.assertRaisesRegex(ValueError, 'path'):
             build.read_package(bad)
+
+    def universal_args(self, output='universal'):
+        return argparse.Namespace(command='universal', runtime=self.root / 'runtime/boot-native-runtime.tar',
+            runtime_manifest=self.root / 'runtime/bundle-manifest.json', selector_release=self.selector,
+            output=self.root / output, init=self.init, oem_script=self.oem)
+
+    def universal(self, output='universal'):
+        args = self.universal_args(output)
+        result = build.build(args)
+        return args.output / result['package']
+
+    def test_universal_build_does_not_read_any_device_boot(self):
+        self.image.unlink()
+        first = self.universal('first')
+        second = self.universal('second')
+        self.assertEqual(first.read_bytes(), second.read_bytes())
+        manifest, files = build.read_package(first)
+        self.assertEqual(manifest['package_kind'], 'universal')
+        self.assertEqual(manifest['boot_strategy'], 'on-device')
+        self.assertFalse(manifest['device_specific_inputs_required'])
+        self.assertFalse(any(name.startswith('boot/') or name.endswith(('.img', '.apk')) for name in files))
+        self.assertIn('patch-boot.sh', files)
+        self.assertEqual(files['LICENSE'], (ROOT / 'LICENSE').read_bytes())
+        self.assertEqual({name for name in files if name.startswith('hooks/')},
+                         {'hooks/' + name for name in build.BOOT_FILES})
+        for field in ('original_sha256', 'candidate_sha256', 'size', 'slot_suffix', 'fingerprint'):
+            self.assertEqual(manifest['boot'][field], 'auto')
+        for field in ('SLOT_SUFFIX', 'BOOT_SIZE', 'BOOT_ORIGINAL_SHA256', 'BOOT_CANDIDATE_SHA256'):
+            self.assertIn((field + '=auto\n').encode(), files['manifest.env'])
+        self.assertIn(b"EXPECTED_FINGERPRINT='auto'\n", files['manifest.env'])
+        self.assertIn(b'BOOT_STRATEGY=on-device\n', files['manifest.env'])
+        self.assertNotIn(str(self.root).encode(), files['manifest.json'])
+        self.assertNotIn(str(self.root).encode(), files['manifest.env'])
+        self.assertEqual(manifest['device_operations'], 0)
+
+    def test_universal_has_the_same_reviewed_hooks_as_personalized_install(self):
+        personal, personal_files = build.read_package(self.install())
+        universal, files = build.read_package(self.universal())
+        self.assertEqual(universal['boot_profile_id'], personal['boot_profile_id'])
+        image = b.parse_boot(personal_files['boot/candidate.img'])
+        cpio_entries, _ = b.parse_cpio(gzip.decompress(image['components']['ramdisk']['data']))
+        cpio_files = {item['name']: item['data'] for item in cpio_entries}
+        for name in build.BOOT_FILES:
+            path = 'overlay.d/' + (name if name.endswith('.rc') else 'sbin/' + name)
+            self.assertEqual(files['hooks/' + name], cpio_files[path])
+            self.assertEqual(universal['hook_sha256'][name], b.sha(files['hooks/' + name]))
+
+    def test_universal_update_chain_uses_profile_and_contains_no_images(self):
+        original = self.universal()
+        initial, _ = build.read_package(original)
+        for number in (1, 2):
+            args = self.args('universal-update' + str(number), command='update', base_package=original)
+            result = build.build(args)
+            original = args.output / result['package']
+            manifest, files = build.read_package(original)
+            self.assertEqual(manifest['base_payload_id'], 'profile')
+            self.assertEqual(manifest['boot_strategy'], 'on-device')
+            self.assertEqual(manifest['boot_profile_id'], initial['boot_profile_id'])
+            self.assertEqual(manifest['boot'], initial['boot'])
+            self.assertFalse(any(name.startswith('boot/') for name in files))
+            self.assertIn('patch-boot.sh', files)
+            self.assertIn(b'BASE_PAYLOAD_ID=profile\n', files['manifest.env'])
+
+    def test_new_universal_payload_keeps_boot_profile_while_hooks_change_it(self):
+        first, first_files = build.read_package(self.universal('old-runtime'))
+        (self.root / 'inputs/md/build/md-boot-native.jar').write_bytes(b'new universal MD payload')
+        package = load('universal_new_runtime_fixture', ROOT / 'tools/boot_native/build_package.py')
+        package.HERE = self.root / 'inputs'
+        package.build(self.root / 'runtime-new')
+        args = self.universal_args('new-runtime')
+        args.runtime = self.root / 'runtime-new/boot-native-runtime.tar'
+        args.runtime_manifest = self.root / 'runtime-new/bundle-manifest.json'
+        result = build.build(args)
+        second, _ = build.read_package(args.output / result['package'])
+        self.assertEqual(first['boot_profile_id'], second['boot_profile_id'])
+        self.assertNotEqual(first['payload_id'], second['payload_id'])
+        hooks = {name: first_files['hooks/' + name] for name in build.BOOT_FILES}
+        hooks['carlife-owner.rc'] += b'# changed early integration\n'
+        changed = build.boot_profile_id(first['boot'], first['runtime_entry_sha256'],
+                                        first['selector_entry_sha256'], hooks, first_files)
+        self.assertNotEqual(changed, first['boot_profile_id'])
+
+    def test_universal_profile_binds_nonversion_payloads(self):
+        original, _ = build.read_package(self.universal('before-selector-change'))
+        path = self.selector / 'selector-control.sh'
+        path.write_bytes(b'new selector helper')
+        manifest = json.loads((self.selector / 'manifest.json').read_text())
+        manifest['payload'][path.name] = b.sha(path.read_bytes())
+        (self.selector / 'manifest.json').write_text(json.dumps(manifest))
+        changed, _ = build.read_package(self.universal('after-selector-change'))
+        self.assertNotEqual(original['boot_profile_id'], changed['boot_profile_id'])
+        self.assertEqual(original['selector_entry_sha256'], changed['selector_entry_sha256'])
+
+    def test_universal_update_preserves_base_hooks_when_local_templates_change(self):
+        original = self.universal()
+        _, initial_files = build.read_package(original)
+        with patch.object(build, 'render_hooks', side_effect=AssertionError('must use original hooks')):
+            args = self.args('update', command='update', base_package=original)
+            result = build.build(args)
+        _, files = build.read_package(args.output / result['package'])
+        for name in build.BOOT_FILES:
+            self.assertEqual(files['hooks/' + name], initial_files['hooks/' + name])
+
+    def test_universal_activated_checksums_include_patcher_and_hooks(self):
+        _, files = build.read_package(self.universal())
+        del files['customize.sh']
+        checks = dict((name, digest) for digest, name in
+                      (line.split('  ', 1) for line in files['module.sha256'].decode().splitlines()))
+        self.assertEqual(set(checks), set(files) - {'module.sha256', 'payload.sha256'})
+        self.assertIn('patch-boot.sh', checks)
+        self.assertTrue(all('hooks/' + name in checks for name in build.BOOT_FILES))
+        self.assertTrue(all(b.sha(files[name]) == digest for name, digest in checks.items()))
+
+    def test_cli_universal_requires_firmware_profile_not_device_inputs(self):
+        args = build.argument_parser().parse_args(['universal', '--runtime', 'a', '--runtime-manifest', 'b',
+            '--selector-release', 'c', '--init', 'd', '--oem-script', 'e', '--output', 'f'])
+        self.assertEqual(args.command, 'universal')
+        for name in ('current_image', 'expect_current_sha256', 'fingerprint', 'slot_suffix', 'base_package'):
+            self.assertFalse(hasattr(args, name), name)
 
     def test_cli_update_needs_no_boot_inputs(self):
         args = build.argument_parser().parse_args(['update', '--runtime', 'a', '--runtime-manifest', 'b',

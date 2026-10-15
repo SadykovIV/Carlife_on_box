@@ -60,6 +60,14 @@ elif name=='sha256sum':
 elif name=='readlink':print(str(pathlib.Path(args[-1]).resolve()))
 elif name=='blockdev':print(pathlib.Path(args[-1]).stat().st_size)
 elif name=='chown' or name=='sync':pass
+elif name=='patch-boot-fixture':
+    state=pathlib.Path(args[0]);module=pathlib.Path(args[1]);size=int(args[2])
+    data=(state/'original.img').read_bytes()
+    assert len(data)==size and not (module/'boot/original.img').exists()
+    patched=data[:64]+b'CarLifeSeed'+data[75:]
+    assert len(patched)==size
+    (state/'candidate.img').write_bytes(patched)
+    (state/'patch-audit.txt').write_text('source='+hashlib.sha256(data).hexdigest()+'\n'+'candidate='+hashlib.sha256(patched).hexdigest()+'\n')
 elif name=='dd':
     kv=dict(x.split('=',1) for x in args if '=' in x);p=pathlib.Path(kv['if']);dest=pathlib.Path(kv['of'])
     data=p.read_bytes()
@@ -121,11 +129,14 @@ class AndroidFixture:
         command.write_text(COMMAND.replace('PYTHON', sys.executable, 1))
         command.chmod(0o755)
         for name in ('id', 'getprop', 'getenforce', 'magisk', 'stat', 'sha256sum', 'readlink',
-                     'blockdev', 'chown', 'sync', 'dd', 'cp', 'mv', 'rm', 'busybox', 'timeout'):
+                     'blockdev', 'chown', 'sync', 'dd', 'cp', 'mv', 'rm', 'busybox', 'timeout', 'patch-boot-fixture'):
             (self.bin / name).symlink_to(command.name)
         magisk_dir = root / 'data/adb/magisk'
         magisk_dir.mkdir(parents=True)
         (magisk_dir / 'busybox').symlink_to(self.bin / 'busybox')
+        android_bin = root / 'system/bin'
+        android_bin.mkdir(parents=True)
+        (android_bin / 'sh').symlink_to('/bin/sh')
         self.env = dict(os.environ, MAGISK_TEST_ROOT=str(root),
                         PATH=str(self.bin) + os.pathsep + os.environ.get('PATH', '/usr/bin:/bin'))
 
@@ -161,7 +172,7 @@ class AndroidFixture:
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
-def package(fixture, *, kind='install', name='current', base_id='none', marker='v1'):
+def package(fixture, *, kind='install', name='current', base_id='none', marker='v1', boot_profile=None, boot_strategy=None):
     module = fixture.module if name == 'current' else fixture.root / 'data/adb/modules_update/carlife_on_box'
     module.mkdir(parents=True, exist_ok=True)
     original = b'ANDROID!fixture-original-boot\x00' * 128
@@ -223,6 +234,14 @@ def package(fixture, *, kind='install', name='current', base_id='none', marker='
                   RUNTIME_ENTRY_SHA256=digest(files['seed/runtime/runtime-control.sh'][0]),
                   SELECTOR_ENTRY_SHA256=digest(files['seed/selector/selector-daemon.sh'][0]),
                   PAYLOAD_ID=payload_id, BASE_PAYLOAD_ID=base_id)
+    values['BOOT_STRATEGY'] = boot_strategy or ('on-device' if kind == 'universal' else 'prebuilt')
+    values['BOOT_PROFILE_ID'] = boot_profile or digest(b'fixture-boot-profile')
+    if values['BOOT_STRATEGY'] == 'on-device':
+        for key in ('SLOT_SUFFIX', 'BOOT_SIZE', 'BOOT_ORIGINAL_SHA256', 'BOOT_CANDIDATE_SHA256', 'EXPECTED_FINGERPRINT'):
+            values[key] = 'auto'
+        files['patch-boot.sh'] = (b'#!/system/bin/sh\nexec patch-boot-fixture "$@"\n', 0o755)
+        for name in ('carlife-owner.rc', 'carlife-early-dispatch.sh', 'carlife-native-entry.sh', 'carlife-selector-entry.sh'):
+            files['hooks/' + name] = (b'fixture boot hook\n', 0o500)
     files['manifest.env'] = (''.join(k + '=' + v + '\n' for k, v in values.items()).encode(), 0o600)
     files['module.prop'] = (b'id=carlife_on_box\n', 0o644)
     files['manifest.json'] = (b'{}\n', 0o600)
@@ -593,6 +612,228 @@ class MagiskLifecycleTests(unittest.TestCase):
         self.assertTrue(self.f.runtime.exists())
         self.assertEqual(self.f.boot.read_bytes(), self.original)
         self.assertEqual((self.f.state / 'original.img').read_bytes(), self.original)
+
+
+class UniversalMagiskLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.f = AndroidFixture(Path(self.temp.name))
+        self.module, self.values, _, _ = package(self.f, kind='universal')
+        self.original = b'ANDROID!' + b'A' * (4096 - 8)
+        self.f.boot.write_bytes(self.original)
+
+    def success(self, result):
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
+    def boot_writes(self, fixture=None):
+        fixture = fixture or self.f
+        return [row for row in fixture.commands() if row[0] == 'dd' and 'of=' + str(fixture.boot) in row]
+
+    def receipt(self, fixture=None):
+        fixture = fixture or self.f
+        return dict(line.split('=', 1) for line in (fixture.state / 'boot.env').read_text().splitlines() if line)
+
+    def patched(self, original):
+        return original[:64] + b'CarLifeSeed' + original[75:]
+
+    def promote(self, staged):
+        shutil.rmtree(self.f.module)
+        staged.rename(self.f.module)
+        (self.f.module / 'customize.sh').unlink(missing_ok=True)
+        (self.f.root / 'proc/sys/kernel/random/boot_id').write_text('00000000-0000-0000-0000-000000000002\n')
+
+    def test_one_package_manifest_uses_each_box_own_boot_and_saves_distinct_receipts(self):
+        temp2 = tempfile.TemporaryDirectory()
+        self.addCleanup(temp2.cleanup)
+        second = AndroidFixture(Path(temp2.name))
+        module2, values2, _, _ = package(second, kind='universal')
+        second_original = b'ANDROID!' + b'B' * (4096 - 8)
+        second.boot.write_bytes(second_original)
+        self.assertEqual(self.values, values2)
+        self.assertEqual((self.module / 'manifest.env').read_bytes(), (module2 / 'manifest.env').read_bytes())
+        for fixture, original, fingerprint in [(self.f, self.original, 'box-one/current'),
+                                                (second, second_original, 'box-two/current')]:
+            with self.subTest(fingerprint=fingerprint):
+                fixture.config['properties']['ro.build.fingerprint'] = fingerprint
+                self.assertEqual(list(fixture.module.rglob('*.img')), [], 'universal package must not carry a donor boot')
+                self.success(fixture.run('install'))
+                self.assertEqual((fixture.state / 'original.img').read_bytes(), original)
+                self.assertEqual(fixture.boot.read_bytes(), self.patched(original))
+                receipt = self.receipt(fixture)
+                self.assertEqual(receipt['BOOT_ORIGINAL_SHA256'], digest(original))
+                self.assertEqual(receipt['BOOT_CANDIDATE_SHA256'], digest(self.patched(original)))
+                self.assertEqual(receipt['BOOT_SIZE'], str(len(original)))
+                self.assertEqual(receipt['SLOT_SUFFIX'], '_a')
+                commands = fixture.commands()
+                patch_calls = [row for row in commands if row[0] == 'patch-boot-fixture']
+                self.assertEqual(len(patch_calls), 1)
+                backup = next(i for i, row in enumerate(commands) if row[0] == 'dd' and 'of=' + str(fixture.state / 'original.img') in row)
+                self.assertLess(backup, commands.index(patch_calls[0]))
+                self.assertEqual(len(self.boot_writes(fixture)), 1)
+        self.assertNotEqual(self.receipt()['BOOT_ORIGINAL_SHA256'], self.receipt(second)['BOOT_ORIGINAL_SHA256'])
+        self.assertNotEqual(self.receipt()['BOOT_CANDIDATE_SHA256'], self.receipt(second)['BOOT_CANDIDATE_SHA256'])
+
+    def test_active_b_is_detected_and_full_rollback_restores_only_its_own_boot(self):
+        inactive_a = self.f.boot
+        inactive_bytes = inactive_a.read_bytes()
+        self.f.boot = inactive_a.with_name('boot_b')
+        self.f.boot.write_bytes(self.original)
+        self.f.config['properties']['ro.boot.slot_suffix'] = '_b'
+        self.success(self.f.run('install'))
+        self.assertEqual(self.receipt()['SLOT_SUFFIX'], '_b')
+        self.assertEqual(self.f.boot.read_bytes(), self.patched(self.original))
+        self.assertEqual(inactive_a.read_bytes(), inactive_bytes)
+        self.success(self.f.run('rollback'))
+        self.assertEqual(self.f.boot.read_bytes(), self.original)
+        self.assertEqual(inactive_a.read_bytes(), inactive_bytes)
+        self.success(self.f.run('uninstall'))
+        self.assertFalse(self.f.runtime.exists())
+        self.assertEqual((self.f.state / 'original.img').read_bytes(), self.original)
+        self.assertEqual(len(self.boot_writes()), 2)
+
+    def test_universal_install_preserves_an_independent_working_baseline(self):
+        self.f.runtime.mkdir()
+        baseline = self.f.runtime / 'runtime-control.sh'
+        baseline.write_bytes(b'existing independent baseline')
+        result = self.f.run('install')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(baseline.read_bytes(), b'existing independent baseline')
+        self.assertFalse((self.f.state / 'original.img').exists())
+        self.assertFalse(self.f.selector.exists())
+        self.assertEqual(self.boot_writes(), [])
+        self.assertEqual([row for row in self.f.commands() if row[0] == 'patch-boot-fixture'], [])
+        self.assertEqual(self.f.boot.read_bytes(), self.original)
+
+    def test_unknown_oem_profile_is_rejected_before_backup_patch_or_seed(self):
+        (self.f.root / 'system/etc/init/hw/init.rc').write_bytes(b'unknown OEM startup')
+        result = self.f.run('install')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('OEM init mismatch', result.stderr)
+        self.assertFalse((self.f.state / 'original.img').exists())
+        self.assertFalse(self.f.runtime.exists())
+        self.assertEqual(self.boot_writes(), [])
+        self.assertEqual([row for row in self.f.commands() if row[0] == 'patch-boot-fixture'], [])
+        self.assertEqual(self.f.boot.read_bytes(), self.original)
+
+    def test_patch_failure_preserves_own_original_without_boot_write_or_runtime_seed(self):
+        self.f.config['fail_command'] = 'patch-boot-fixture'
+        result = self.f.run('install')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.f.state / 'original.img').read_bytes(), self.original)
+        self.assertEqual(self.f.boot.read_bytes(), self.original)
+        self.assertEqual(self.boot_writes(), [])
+        self.assertFalse(self.f.runtime.exists())
+        self.assertFalse((self.f.state / 'boot.env').exists())
+        self.assertFalse((self.f.state / 'candidate.img').exists())
+
+    def test_same_universal_zip_updates_data_without_repatching_or_replacing_first_backup(self):
+        self.success(self.f.run('install'))
+        receipt = (self.f.state / 'boot.env').read_bytes()
+        backup_stat = (self.f.state / 'original.img').stat()
+        (self.f.selector / 'selected').write_text('carplay\n')
+        staged, _, _, _ = package(self.f, kind='universal', name='staged', marker='v2')
+        self.success(self.f.run('install', staged))
+        version = self.f.runtime / 'versions/boot-native-v1-20261014'
+        self.assertEqual((version / 'md.jar').read_bytes(), b'v1')
+        self.promote(staged)
+        self.success(self.f.run('activate'))
+        self.assertEqual((version / 'md.jar').read_bytes(), b'v2')
+        self.assertEqual((self.f.selector / 'selected').read_text(), 'carplay\n')
+        self.assertEqual((self.f.state / 'original.img').stat().st_mtime_ns, backup_stat.st_mtime_ns)
+        self.assertEqual((self.f.state / 'original.img').read_bytes(), self.original)
+        self.assertEqual((self.f.state / 'boot.env').read_bytes(), receipt)
+        self.assertEqual(len(self.boot_writes()), 1)
+        self.assertEqual(len([row for row in self.f.commands() if row[0] == 'patch-boot-fixture']), 1)
+
+    def test_failed_local_patch_can_be_retried_using_the_same_original_backup(self):
+        self.f.config['fail_command'] = 'patch-boot-fixture'
+        self.assertNotEqual(self.f.run('install').returncode, 0)
+        backup_stat = (self.f.state / 'original.img').stat()
+        self.f.config = {'properties': self.f.config['properties']}
+        self.success(self.f.run('install'))
+        self.assertEqual(self.f.boot.read_bytes(), self.patched(self.original))
+        self.assertEqual((self.f.state / 'original.img').stat().st_mtime_ns, backup_stat.st_mtime_ns)
+        self.assertEqual((self.f.state / 'original.img').read_bytes(), self.original)
+        self.assertEqual(len(self.boot_writes()), 1)
+        self.assertEqual(len([row for row in self.f.commands() if row[0] == 'patch-boot-fixture']), 2)
+
+    def test_failure_after_candidate_publication_retries_without_replacing_original_backup(self):
+        self.f.config.update(fail_command='patch-boot-fixture', fail_after=True)
+        self.assertNotEqual(self.f.run('install').returncode, 0)
+        self.assertEqual((self.f.state / 'candidate.img').read_bytes(), self.patched(self.original))
+        self.assertFalse((self.f.state / 'boot.env').exists())
+        self.assertFalse(self.f.runtime.exists())
+        self.assertEqual(self.boot_writes(), [])
+        self.f.config = {'properties': self.f.config['properties']}
+        self.success(self.f.run('install'))
+        self.assertEqual(self.f.boot.read_bytes(), self.patched(self.original))
+        self.assertEqual((self.f.state / 'original.img').read_bytes(), self.original)
+        self.assertEqual(len(self.boot_writes()), 1)
+
+    def test_failure_after_original_manifest_before_prepared_phase_can_retry(self):
+        self.f.config.update(fail_command='mv', fail_contains=[str(self.f.state / 'original.env')],
+                             fail_after=True)
+        self.assertNotEqual(self.f.run('install').returncode, 0)
+        self.assertTrue((self.f.state / 'original.env').is_file())
+        self.assertTrue((self.f.state / 'boot.env').is_file())
+        self.assertFalse((self.f.state / 'phase').exists())
+        self.assertEqual(self.boot_writes(), [])
+        self.f.config = {'properties': self.f.config['properties']}
+        self.success(self.f.run('install'))
+        self.assertEqual(self.f.boot.read_bytes(), self.patched(self.original))
+        self.assertEqual((self.f.state / 'original.img').read_bytes(), self.original)
+        self.assertEqual((self.f.state / 'phase').read_text(), 'installed\n')
+        self.assertEqual(len(self.boot_writes()), 1)
+
+    def test_universal_reinstall_after_complete_rollback_keeps_original_and_archives_old_candidate(self):
+        self.success(self.f.run('install'))
+        backup_stat = (self.f.state / 'original.img').stat()
+        self.success(self.f.run('rollback'))
+        (self.f.root / 'proc/sys/kernel/random/boot_id').write_text('00000000-0000-0000-0000-000000000002\n')
+        self.success(self.f.run('rollback'))
+        self.assertFalse(self.f.runtime.exists())
+        self.assertEqual(self.f.boot.read_bytes(), self.original)
+        shutil.rmtree(self.f.module)
+        package(self.f, kind='universal')
+        self.success(self.f.run('install'))
+        self.assertEqual(self.f.boot.read_bytes(), self.patched(self.original))
+        self.assertEqual((self.f.state / 'original.img').stat().st_mtime_ns, backup_stat.st_mtime_ns)
+        self.assertEqual((self.f.state / 'original.img').read_bytes(), self.original)
+        self.assertEqual((self.f.state / ('candidate.' + digest(self.patched(self.original)) + '.img')).read_bytes(), self.patched(self.original))
+        self.assertFalse((self.f.state / 'rollback-boot-id').exists())
+        self.assertFalse((self.f.state / 'cleanup').exists())
+        self.assertEqual(len(self.boot_writes()), 3)
+        self.success(self.f.run('rollback'))
+        self.assertTrue(self.f.runtime.exists(), 'live reinstall cannot inherit cleanup authorization from a previous boot')
+        self.assertTrue(self.f.selector.exists())
+        self.assertEqual(self.f.boot.read_bytes(), self.original)
+
+    def test_dedicated_update_package_uses_the_universal_boot_receipt_without_repatch(self):
+        self.success(self.f.run('install'))
+        receipt = (self.f.state / 'boot.env').read_bytes()
+        staged, _, _, _ = package(self.f, kind='update', name='staged', marker='v2',
+                                  base_id='profile', boot_strategy='on-device')
+        self.success(self.f.run('install', staged))
+        self.promote(staged)
+        self.success(self.f.run('activate'))
+        self.assertEqual((self.f.runtime / 'versions/boot-native-v1-20261014/md.jar').read_bytes(), b'v2')
+        self.assertEqual((self.f.state / 'boot.env').read_bytes(), receipt)
+        self.assertEqual((self.f.state / 'original.img').read_bytes(), self.original)
+        self.assertEqual(len(self.boot_writes()), 1)
+        self.assertEqual(len([row for row in self.f.commands() if row[0] == 'patch-boot-fixture']), 1)
+
+    def test_changed_boot_profile_update_is_rejected_before_pending_or_boot_write(self):
+        self.success(self.f.run('install'))
+        staged, _, _, _ = package(self.f, kind='universal', name='staged', marker='v2',
+                                  boot_profile=digest(b'different early hooks'))
+        result = self.f.run('install', staged)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.f.state / 'pending').exists())
+        self.assertEqual((self.f.runtime / 'versions/boot-native-v1-20261014/md.jar').read_bytes(), b'v1')
+        self.assertEqual((self.f.state / 'original.img').read_bytes(), self.original)
+        self.assertEqual(len(self.boot_writes()), 1)
 
 
 if __name__ == '__main__':

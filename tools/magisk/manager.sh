@@ -48,10 +48,40 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
+read_boot_receipt() {
+    [ -f "$D/boot.env" ] && [ ! -L "$D/boot.env" ] || die 'device boot receipt missing'
+    # Only four device-derived values may override the portable manifest.
+    # In particular, never replace the incoming package/profile identity.
+    [ "$(wc -l < "$D/boot.env" | tr -d ' ')" = 4 ] || die 'invalid boot receipt'
+    SLOT_SUFFIX=$(sed -n 's/^SLOT_SUFFIX=//p' "$D/boot.env")
+    BOOT_SIZE=$(sed -n 's/^BOOT_SIZE=//p' "$D/boot.env")
+    BOOT_ORIGINAL_SHA256=$(sed -n 's/^BOOT_ORIGINAL_SHA256=//p' "$D/boot.env")
+    BOOT_CANDIDATE_SHA256=$(sed -n 's/^BOOT_CANDIDATE_SHA256=//p' "$D/boot.env")
+    case "$BOOT_SIZE" in ''|*[!0-9]*) die 'boot receipt size';; esac
+    for value in "$BOOT_ORIGINAL_SHA256" "$BOOT_CANDIDATE_SHA256"; do
+        [ "${#value}" = 64 ] || die 'boot receipt hash length'
+        case "$value" in *[!0-9a-f]*) die 'boot receipt hash';; esac
+    done
+}
 load_env() {
     [ -f "$1" ] && [ ! -L "$1" ] || die 'missing manifest'
+    BOOT_STRATEGY=prebuilt
+    BOOT_PROFILE_ID=none
     . "$1"
     [ "$FORMAT:$MODULE_ID:$PROFILE" = '1:carlife_on_box:tbox-ultra-1-sm6350-v1' ] || die 'unsupported package'
+    case "$BOOT_STRATEGY" in
+        prebuilt) ;;
+        on-device)
+            [ "${#BOOT_PROFILE_ID}" = 64 ] || die 'boot profile'
+            case "$BOOT_PROFILE_ID" in *[!0-9a-f]*) die 'boot profile';; esac
+            if exists "$D/boot.env"; then
+                read_boot_receipt
+            else
+                [ "$ACTION:$PACKAGE_KIND" = install:universal ] || die 'first universal install required'
+                SLOT_SUFFIX=$(getprop ro.boot.slot_suffix)
+            fi;;
+        *) die 'boot strategy';;
+    esac
     case "$SLOT_SUFFIX" in _a|_b) ;; *) die 'slot';; esac
     BOOT=/dev/block/by-name/boot$SLOT_SUFFIX
     V=$P/versions/$RUNTIME_VERSION
@@ -68,14 +98,22 @@ verify_package() {
 device() {
     [ "$(id -u)" = 0 ] || die 'root required'
     [ "$(getprop ro.boot.slot_suffix)" = "$SLOT_SUFFIX" ] || die 'active slot differs from package'
-    [ "$(getprop ro.build.fingerprint)" = "$EXPECTED_FINGERPRINT" ] || die 'firmware differs from package'
+    if [ "$BOOT_STRATEGY" = prebuilt ]; then
+        [ "$(getprop ro.build.fingerprint)" = "$EXPECTED_FINGERPRINT" ] || die 'firmware differs from package'
+    fi
     [ "$(getprop ro.build.version.sdk)" = "$SDK" ] || die 'Android SDK mismatch'
     [ "$(getprop ro.board.reverse.custom)" = "$BOARD" ] || die 'board mismatch'
     grep -F -x "CHANNEL=$CHANNEL" /system/bin/sd-reverse.sh >/dev/null || die 'projection channel mismatch'
     [ "$(magisk -V)" -ge "$MAGISK_VERSION_CODE" ] || die 'Magisk version is too old for this installer'
     [ "$(getprop ro.boot.vbmeta.device_state)" = unlocked ] || die 'bootloader must already be unlocked'
     [ "$(getenforce)" = Permissive ] || die 'this profile has no verified enforcing policy; security left unchanged'
-    [ -b "$BOOT" ] && [ "$(blockdev --getsize64 "$BOOT")" = "$BOOT_SIZE" ] || die 'boot partition size/type'
+    [ -b "$BOOT" ] || die 'boot partition type'
+    if [ "$BOOT_STRATEGY:$BOOT_SIZE" = on-device:auto ]; then
+        BOOT_SIZE=$(blockdev --getsize64 "$BOOT")
+        case "$BOOT_SIZE" in ''|*[!0-9]*) die 'boot partition size';; esac
+        BOOT_ORIGINAL_SHA256=$(digest "$BOOT")
+    fi
+    [ "$(blockdev --getsize64 "$BOOT")" = "$BOOT_SIZE" ] || die 'boot partition size/type'
     [ "$(digest /system/etc/init/hw/init.rc)" = "$INIT_SHA256" ] || die 'OEM init mismatch'
     [ "$(digest /system/bin/sd-reverse.sh)" = "$OEM_SHA256" ] || die 'OEM projection mismatch'
 }
@@ -117,17 +155,40 @@ fresh_install() {
     directory /data/local && directory /data/adb || die 'data parent paths'
     ! exists "$P" && ! exists "$S" || die 'existing CarLife roots preserved; use their current updater'
     ! exists /data/adb/modules/carlife_native_pilot_v3 || die 'historical pilot present; preserve the existing installation'
-    if exists "$D/original.env"; then
-        [ "$(cat "$D/phase")" = rollback ] || die 'existing transaction preserved; use its recovery manager'
+    if exists "$D/original.img"; then
         hash_is "$D/original.img" "$BOOT_ORIGINAL_SHA256" || die 'existing original backup differs'
     else
         dd if="$BOOT" of="$D/original.img" bs=1048576
         chmod 400 "$D/original.img"; sync
         hash_is "$D/original.img" "$BOOT_ORIGINAL_SHA256" || die 'original backup readback'
     fi
+    [ "$(stat -c '%s' "$D/original.img")" = "$BOOT_SIZE" ] || die 'original backup size'
+    if [ "$BOOT_STRATEGY" = on-device ]; then
+        if exists "$D/candidate.img"; then
+            # Retry is safe here only because boot still equals the saved
+            # original and both live roots are absent (checked above). This
+            # also covers interruption after patch publication but before the
+            # receipt/phase commit. Retain the previous attempt as evidence.
+            [ -f "$D/candidate.img" ] && [ ! -L "$D/candidate.img" ] || die 'previous candidate type'
+            previous_candidate=$(digest "$D/candidate.img")
+            mv "$D/candidate.img" "$D/candidate.$previous_candidate.img"
+            sync
+        fi
+        sh "$M/patch-boot.sh" "$D" "$M" "$BOOT_SIZE" || die 'local boot patch failed; nothing flashed'
+        [ -f "$D/candidate.img" ] && [ ! -L "$D/candidate.img" ] || die 'local candidate missing'
+        [ "$(stat -c '%s' "$D/candidate.img")" = "$BOOT_SIZE" ] || die 'local candidate size'
+        BOOT_CANDIDATE_SHA256=$(digest "$D/candidate.img")
+        [ "$BOOT_CANDIDATE_SHA256" != "$BOOT_ORIGINAL_SHA256" ] || die 'local boot patch made no change'
+        chmod 400 "$D/candidate.img"; sync
+        atomic "$D/boot.env" "SLOT_SUFFIX=$SLOT_SUFFIX
+BOOT_SIZE=$BOOT_SIZE
+BOOT_ORIGINAL_SHA256=$BOOT_ORIGINAL_SHA256
+BOOT_CANDIDATE_SHA256=$BOOT_CANDIDATE_SHA256"
+    else
+        cp "$M/boot/candidate.img" "$D/candidate.img"; chmod 400 "$D/candidate.img"
+        hash_is "$D/candidate.img" "$BOOT_CANDIDATE_SHA256" || die 'candidate backup readback'
+    fi
     atomic_copy "$M/manifest.env" "$D/original.env" 400
-    cp "$M/boot/candidate.img" "$D/candidate.img"; chmod 400 "$D/candidate.img"
-    hash_is "$D/candidate.img" "$BOOT_CANDIDATE_SHA256" || die 'candidate backup readback'
     remember_tools
     rm -f "$D/rollback-boot-id" "$D/cleanup"
     phase prepared
@@ -143,12 +204,26 @@ fresh_install() {
     phase installed
     say 'CarLife installed. Reboot once to activate. Original boot is saved outside the module.'
 }
+update_origin() {
+    if [ "$BOOT_STRATEGY" = on-device ]; then
+        original_strategy=$(sed -n 's/^BOOT_STRATEGY=//p' "$D/original.env")
+        original_profile=$(sed -n 's/^BOOT_PROFILE_ID=//p' "$D/original.env")
+        [ "$original_strategy" = on-device ] && [ "$BOOT_PROFILE_ID" = "$original_profile" ] || die 'update boot profile differs'
+        case "$PACKAGE_KIND" in
+            universal) ;;
+            update) [ "$BASE_PAYLOAD_ID" = profile ] || die 'update origin mismatch';;
+            *) die 'on-device update package kind';;
+        esac
+    else
+        install_id=$(sed -n 's/^PAYLOAD_ID=//p' "$D/original.env")
+        [ "$BASE_PAYLOAD_ID" = "$install_id" ] || die 'update belongs to another installation'
+    fi
+}
 stage_update() {
     check_owned
     directory "$P/versions" || die 'runtime versions path'
     [ -f "$D/original.env" ] && [ -f "$D/current.env" ] || die 'first install required'
-    install_id=$(sed -n 's/^PAYLOAD_ID=//p' "$D/original.env")
-    [ "$BASE_PAYLOAD_ID" = "$install_id" ] || die 'update belongs to another installation'
+    update_origin
     boot_is "$BOOT_CANDIDATE_SHA256" || die 'boot changed; update preserved existing files'
     [ "$(cat "$D/phase")" = installed ] || die 'finish the previous transaction first'
     check_payload "$V" || die 'current runtime damaged'
@@ -170,8 +245,8 @@ activate() {
     fi
     check_owned
     directory "$P/versions" || die 'runtime versions path'
-    [ "$PACKAGE_KIND" = update ] || die 'pending package is not an update'
-    [ "$BASE_PAYLOAD_ID" = "$(sed -n 's/^PAYLOAD_ID=//p' "$D/original.env")" ] || die 'update origin mismatch'
+    case "$PACKAGE_KIND" in update|universal) ;; *) die 'pending package is not an update';; esac
+    update_origin
     boot_is "$BOOT_CANDIDATE_SHA256" || die 'boot changed before update activation'
     # A validated staged directory and a previous directory make interrupted
     # renames resumable. No live native process can pass the pending boot gate.
@@ -275,7 +350,14 @@ fi
 directory "$D" && [ "$(stat -c '%u:%g:%a' "$D")" = 0:0:700 ] || die 'state directory ownership'
 lock
 case "$ACTION" in
- install) case "$PACKAGE_KIND" in install) fresh_install;; update) stage_update;; *) die 'package kind';; esac;;
+ install) case "$PACKAGE_KIND" in
+     install) fresh_install;;
+     update) stage_update;;
+     universal)
+         [ "$BOOT_STRATEGY" = on-device ] || die 'universal boot strategy'
+         if [ -f "$D/phase" ] && [ "$(cat "$D/phase")" = installed ]; then stage_update
+         else fresh_install; fi;;
+     *) die 'package kind';; esac;;
  activate)
     if [ "$(cat "$D/phase")" = rollback ]; then rollback
     elif [ "$(cat "$D/phase")" = prepared ]; then

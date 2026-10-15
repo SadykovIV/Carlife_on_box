@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Build an exact-input Magisk install or data-only update ZIP, entirely offline.
+"""Build a Magisk installer for a supported TBox firmware, entirely offline.
 
-The install ZIP contains the owner's original Magisk boot image and a minimally
-patched copy. Updates inherit that boot integration and cannot silently change
-its pinned entry points. No firmware, APK, signing key or prebuilt boot is shipped
-with this source. All inputs are supplied by the owner.
+The preferred universal ZIP patches the receiving device's own Magisk boot at
+installation time. No device boot, fingerprint, SDK or proprietary APK is needed
+to build that package. The optional install command retains the exact-image
+workflow. Both forms support data-only updates and the device's original backup.
 """
 from __future__ import annotations
 
@@ -209,7 +209,7 @@ def read_package(path):
     manifest = json.loads(result['manifest.json'])
     require(manifest['format'] == 1 and manifest['profile'] == PROFILE and manifest['module_id'] == MODULE_ID,
             'base package profile')
-    require(manifest['package_kind'] in ('install', 'update'), 'base package kind')
+    require(manifest['package_kind'] in ('install', 'universal', 'update'), 'base package kind')
     return manifest, result
 
 
@@ -227,34 +227,66 @@ def shell_env(values):
     return ''.join(rows).encode()
 
 
+def firmware_profile(init_path, oem_path):
+    init = regular_bytes(init_path, 1024 * 1024)
+    require(sha(init) == integration.INIT_SHA, 'unsupported OEM init; use the reviewed firmware profile')
+    require(init.count(b'service sd-reverse /system/bin/sd-reverse.sh\n') == 1 and
+            init.count(b'    start sd-reverse\n') == 1, 'OEM service/start count')
+    require(init.index(b'on early-init\n') < init.index(b'    start sd-reverse\n') <
+            init.index(b'    exec_start apexd-bootstrap\n'), 'OEM early-init order')
+    oem = regular_bytes(oem_path, 1024 * 1024)
+    require(b'CHANNEL=sd_msm6350' in oem.splitlines(), 'supported OEM projection channel')
+    return dict(oem_sha256=sha(oem), init_sha256=sha(init))
+
+
+def boot_profile_id(pins, runtime_sha, selector_sha, hooks, seeds):
+    """Hardware-independent identity of the installed early-boot integration."""
+    values = dict(profile=PROFILE, board='chelianyi-led', channel='sd_msm6350', sdk=35,
+                  init_sha256=pins['init_sha256'], oem_sha256=pins['oem_sha256'],
+                  runtime_version=VERSION, runtime_entry_sha256=runtime_sha,
+                  selector_entry_sha256=selector_sha,
+                  hooks={name: sha(value) for name, value in sorted(hooks.items())},
+                  immutable_seed_sha256={name: sha(value) for name, value in sorted(seeds.items())
+                      if name.startswith('seed/') and
+                      not name.startswith('seed/runtime/versions/' + VERSION + '/')})
+    return sha(json.dumps(values, sort_keys=True, separators=(',', ':')).encode())
+
+
 def build(args):
+    require(args.command in ('install', 'universal', 'update'), 'package command')
     require(not args.output.exists(), 'fresh output directory required')
     files, modes, dirs = seed_inputs(args.runtime, args.runtime_manifest, args.selector_release)
     runtime_sha = sha(files['seed/runtime/runtime-control.sh'])
     selector_sha = sha(files['seed/selector/selector-daemon.sh'])
-    audit = None
-    if args.command == 'install':
-        original = regular_bytes(args.current_image)
-        require(re.fullmatch(r'[a-f0-9]{64}', args.expect_current_sha256), 'current boot SHA256 syntax')
-        require(sha(original) == args.expect_current_sha256, 'current boot SHA256 mismatch')
-        init = regular_bytes(args.init, 1024 * 1024)
-        require(sha(init) == integration.INIT_SHA, 'unsupported OEM init; use the reviewed firmware profile')
-        require(init.count(b'service sd-reverse /system/bin/sd-reverse.sh\n') == 1 and
-                init.count(b'    start sd-reverse\n') == 1, 'OEM service/start count')
-        require(init.index(b'on early-init\n') < init.index(b'    start sd-reverse\n') <
-                init.index(b'    exec_start apexd-bootstrap\n'), 'OEM early-init order')
-        oem = regular_bytes(args.oem_script, 1024 * 1024)
-        pins = dict(original_sha256=sha(original), oem_sha256=sha(oem), init_sha256=sha(init),
-                    size=len(original), fingerprint=single_line(args.fingerprint), slot_suffix=args.slot_suffix)
+    audit, hooks = None, {}
+    if args.command in ('install', 'universal'):
+        pins = firmware_profile(args.init, args.oem_script)
         hooks = render_hooks(pins['oem_sha256'], runtime_sha, selector_sha)
-        candidate, audit = boot.overlay_image(original, hooks)
-        pins['candidate_sha256'] = sha(candidate)
-        files.update({'boot/original.img': original, 'boot/candidate.img': candidate})
-        modes.update({'boot/original.img': 0o400, 'boot/candidate.img': 0o400})
+        profile_id = boot_profile_id(pins, runtime_sha, selector_sha, hooks, files)
+        if args.command == 'install':
+            original = regular_bytes(args.current_image)
+            require(re.fullmatch(r'[a-f0-9]{64}', args.expect_current_sha256), 'current boot SHA256 syntax')
+            require(sha(original) == args.expect_current_sha256, 'current boot SHA256 mismatch')
+            require(args.slot_suffix in ('_a', '_b'), 'supported slot suffix')
+            pins.update(original_sha256=sha(original), size=len(original),
+                        fingerprint=single_line(args.fingerprint), slot_suffix=args.slot_suffix)
+            candidate, audit = boot.overlay_image(original, hooks)
+            pins['candidate_sha256'] = sha(candidate)
+            files.update({'boot/original.img': original, 'boot/candidate.img': candidate})
+            modes.update({'boot/original.img': 0o400, 'boot/candidate.img': 0o400})
+            strategy = 'prebuilt'
+        else:
+            # No device-specific data is available or needed in the universal ZIP.
+            pins.update(original_sha256='auto', candidate_sha256='auto', size='auto',
+                        fingerprint='auto', slot_suffix='auto')
+            strategy = 'on-device'
         base_id = 'none'
     else:
         previous, base_files = read_package(args.base_package)
         pins = previous['boot']
+        strategy = previous.get('boot_strategy', 'prebuilt')
+        require(strategy in ('prebuilt', 'on-device'), 'base boot strategy')
+        profile_id = previous.get('boot_profile_id', 'none')
         require(previous['runtime_entry_sha256'] == runtime_sha and
                 previous['selector_entry_sha256'] == selector_sha,
                 'data-only update cannot change boot-pinned entry points')
@@ -263,13 +295,25 @@ def build(args):
         for name, value in files.items():
             if not name.startswith(change_prefix):
                 require(base_files.get(name) == value, 'data-only update changes an immutable seed: ' + name)
-        base_id = previous['payload_id'] if previous['package_kind'] == 'install' else previous['base_payload_id']
-    for name in SCRIPTS:
+        if strategy == 'on-device':
+            # Keep the exact installed hook bytes even if local templates evolve.
+            hooks = {name: base_files['hooks/' + name] for name in BOOT_FILES}
+            require(profile_id == boot_profile_id(pins, runtime_sha, selector_sha, hooks, files),
+                    'base universal boot profile mismatch')
+            base_id = 'profile'
+        else:
+            base_id = previous['payload_id'] if previous['package_kind'] == 'install' else previous['base_payload_id']
+    if strategy == 'on-device':
+        for name, value in hooks.items():
+            files['hooks/' + name], modes['hooks/' + name] = value, (0o644 if name.endswith('.rc') else 0o500)
+    scripts = SCRIPTS + (('patch-boot.sh',) if strategy == 'on-device' else ())
+    for name in scripts:
         files[name], modes[name] = regular_bytes(ROOT / 'tools/magisk' / name, 1024 * 1024), 0o755
     files['module.prop'] = (f'id={MODULE_ID}\nname=Baidu CarLife on Android Box\n'
         f'version=1.0\nversionCode=1\nauthor=Carlife_on_box contributors\n'
-        f'description=TBox Ultra 1 native CarLife; reversible exact-boot integration.\n').encode()
+        f'description=TBox Ultra 1 native CarLife; reversible installation and updates.\n').encode()
     modes['module.prop'] = 0o644
+    files['LICENSE'], modes['LICENSE'] = regular_bytes(ROOT / 'LICENSE', 1024 * 1024), 0o644
     # A normal Magisk module ZIP; deliberately no updater-binary/recovery flasher.
     files['skip_mount'], modes['skip_mount'] = b'', 0o644
     seed_names = sorted(name for name in files if name.startswith('seed/'))
@@ -280,6 +324,7 @@ def build(args):
     modes.update({'payload-files.tsv': 0o600, 'payload-dirs.tsv': 0o600})
     payload_id = sha(''.join(f'{name}\0{sha(data)}\n' for name, data in sorted(files.items())).encode())
     env = dict(FORMAT=1, MODULE_ID=MODULE_ID, PACKAGE_KIND=args.command, PROFILE=PROFILE,
+        BOOT_STRATEGY=strategy, BOOT_PROFILE_ID=profile_id,
         SLOT_SUFFIX=pins['slot_suffix'], BOARD='chelianyi-led', CHANNEL='sd_msm6350', SDK=35,
         # Minimum tested Magisk, not a cap on later compatible releases.
         MAGISK_VERSION_CODE=30700, EXPECTED_FINGERPRINT=pins['fingerprint'], RUNTIME_VERSION=VERSION,
@@ -289,10 +334,13 @@ def build(args):
         PAYLOAD_ID=payload_id, BASE_PAYLOAD_ID=base_id)
     files['manifest.env'], modes['manifest.env'] = shell_env(env), 0o600
     manifest = dict(format=1, module_id=MODULE_ID, profile=PROFILE, package_kind=args.command,
-        payload_id=payload_id, base_payload_id=base_id, boot=pins, runtime_version=VERSION,
+        payload_id=payload_id, base_payload_id=base_id, boot=pins, boot_strategy=strategy,
+        boot_profile_id=profile_id, runtime_version=VERSION,
         runtime_entry_sha256=runtime_sha, selector_entry_sha256=selector_sha,
         default_selection='carlife', hardware_validation='NOT_TESTED', device_operations=0,
         boot_audit=audit, proprietary_apks_included=False,
+        device_specific_inputs_required=(strategy == 'prebuilt'),
+        hook_sha256={name: sha(value) for name, value in sorted(hooks.items())} if strategy == 'on-device' else {},
         source_runtime_sha256=sha(regular_bytes(args.runtime)),
         source_selector_manifest_sha256=sha(regular_bytes(args.selector_release / 'manifest.json')),
         builder_sha256=sha(Path(__file__).read_bytes()), boot_parser_sha256=sha((ROOT / 'tools/magisk/boot_image.py').read_bytes()))
@@ -325,20 +373,21 @@ def build(args):
 def argument_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
-    for kind in ('install', 'update'):
+    for kind in ('universal', 'install', 'update'):
         sub = commands.add_parser(kind)
         sub.add_argument('--runtime', type=Path, required=True)
         sub.add_argument('--runtime-manifest', type=Path, required=True)
         sub.add_argument('--selector-release', type=Path, required=True)
         sub.add_argument('--output', type=Path, required=True)
+        if kind in ('install', 'universal'):
+            sub.add_argument('--init', type=Path, required=True)
+            sub.add_argument('--oem-script', type=Path, required=True)
         if kind == 'install':
             sub.add_argument('--current-image', type=Path, required=True)
             sub.add_argument('--expect-current-sha256', required=True)
-            sub.add_argument('--init', type=Path, required=True)
-            sub.add_argument('--oem-script', type=Path, required=True)
             sub.add_argument('--fingerprint', required=True)
             sub.add_argument('--slot-suffix', choices=('_a', '_b'), default='_a')
-        else:
+        elif kind == 'update':
             sub.add_argument('--base-package', type=Path, required=True)
     return parser
 

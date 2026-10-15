@@ -2,90 +2,54 @@
 
 [Русский](ru/MAGISK_INSTALLER.md) · [Home](../README.md)
 
-The installer adds native CarLife to the supported **TBox Ultra 1 / SM6350 Android 15** profile without replacing the complete firmware or erasing applications and user data. The package is built for the target box's own Magisk-patched boot image. It is not a boot image copied from another box.
+**One ZIP installs native CarLife on matching TBox Ultra 1 / SM6350 Android 15 boxes.** You do not need to extract boot on a computer or rebuild the ZIP for each box. During installation, the module reads the box's own active boot, saves it and adds early CarLife startup with Magisk's local `magiskboot`. The ZIP contains **no boot image from another device**.
 
-**Status:** installer and recovery workflows are checked offline. Installation, update and rollback on a second physical TBox have not been tested. The previously accepted development runtime and its artifacts are retained.
+**Status:** the installer is checked offline; installation, update and rollback on a second physical TBox remain to be tested. The accepted development runtime and its artifacts are preserved.
 
-## Install
+## Install or update
 
-1. Obtain the `Carlife_on_box-TBox-Ultra-1-install.zip` built for your current firmware, boot image and active slot.
-2. Open **Magisk → Modules → Install from storage**, select the ZIP and wait for successful completion. Keep power connected while it saves and writes boot.
-3. Reboot once. **Baidu CarLife is the default**; connect the box to a ready CarLife head unit.
+1. Copy `Carlife_on_box-TBox-Ultra-1-universal.zip` to the box.
+2. Open **Magisk → Modules → Install from storage**, select the ZIP and wait for success. Keep power connected while boot is backed up and written.
+3. Reboot once, then connect to a ready CarLife head unit. **Baidu CarLife is selected by default on a fresh installation.**
 
-The installer verifies the device profile before writing. It saves the original boot, installs the runtime and adds early init hooks to the current boot partition. Android system partitions, the other boot slot, existing AA/CarPlay configuration and ADB settings are not changed. The hooks select CarLife before the OEM projection service takes USB; this does not use a late `service.sh` takeover.
+For an update, install the new universal ZIP the same way. The installer recognizes its existing installation: it stages the runtime update for the next reboot and preserves your selection and first boot backup. **Runtime updates do not write boot again.** They must keep the installed early entry points; changing those is a new boot integration.
 
-In CarLife mode, USB serves the head unit; this does not promise simultaneous USB ADB. Use an existing Wi-Fi ADB connection or your backup AA/CarPlay display for maintenance.
+The initial installation writes only the active boot partition (`boot_a` or `boot_b`, detected automatically). Android system partitions, the other boot slot, apps, user data, existing AA/CarPlay configuration and ADB settings stay unchanged. CarLife starts before the OEM projection service takes USB, without a late `service.sh` takeover.
 
-This profile requires working Magisk 30.7 or newer/root, an already unlocked bootloader and the reference firmware's existing permissive SELinux mode. The installer does not change these settings. Existing independently installed CarLife files are preserved; use their existing updater instead of installing over the development baseline.
+The ZIP checks the supported firmware's actual OEM startup files, board and Android version. A different fingerprint or a different original boot hash alone does not require another package. It requires working Magisk 30.7 or newer/root, an already unlocked bootloader and the reference firmware's existing permissive SELinux mode; it does not change these settings. An independently installed development baseline is preserved rather than adopted silently.
 
-The module's **Action** button displays status. It does not switch USB or reboot. This minimal package does not modify proprietary Settings/launcher APKs, so it does not add a third entry to their AA/CarPlay menu or change RESET-button behavior. Optional OEM UI integration remains a separate [source build](BUILD_MD.md).
-
-## Update
-
-Install the matching `Carlife_on_box-TBox-Ultra-1-update.zip` through Magisk, then reboot. The current session keeps running until reboot. The update replaces the runtime payload, preserves the saved selection and original boot backup, and does **not** write boot again.
-
-Updates must retain the boot-pinned resolver and selector entry points. A change to those entry points is a new boot integration, not a runtime update. Ordinary MD, controller and observer updates use the existing integration.
+In CarLife mode, USB serves the head unit. For maintenance, use existing Wi-Fi ADB or a backup AA/CarPlay display. The module's **Action** button displays status. This package does not replace proprietary Settings/launcher APKs, add a third item to their AA/CarPlay menu, or change RESET-button behavior. Optional OEM UI integration remains a separate [source build](BUILD_MD.md).
 
 ## Full rollback
 
-For the shortest rollback, run this command in an Android terminal with root, or inside an existing ADB shell:
+In an Android terminal with root, or inside an existing ADB shell, run:
 
 ```sh
 su -c '/data/adb/magisk/busybox sh /data/adb/carlife-on-box/manager.sh rollback'
 ```
 
-After it reports that the original boot was restored, reboot. The module is removed and its runtime/selection files are cleaned up. **Original** means the exact boot saved before this installer, including the Magisk installation that was already present. It does not factory-reset the box or remove root.
+After it reports that the original boot was restored, reboot. The module and its runtime/selection files are removed. **Original** means this box's exact boot before the first installation, including its existing Magisk. No factory reset or removal of root is performed.
 
-You can also choose **Remove** in Magisk. Magisk runs the removal hook on the next boot; that hook restores boot. Reboot once more to actually load the restored image.
+Alternatively, choose **Remove** in Magisk. The removal hook restores boot at the next startup; reboot once more to load that restored image. **Disabling** the module and rebooting only returns temporarily to the existing OEM AA/CarPlay mode; it is not full rollback.
 
-Turning the module **off** in Magisk and rebooting temporarily returns to the existing OEM AA/CarPlay mode. This leaves the CarLife boot hooks and recovery files in place; it is not full rollback.
+The recovery manager, `original.img`, per-device `boot.env` and logs stay at `/data/adb/carlife-on-box/`, outside the module. If another tool changed boot after installation, rollback reports the mismatch and preserves that newer image. An interrupted boot-partition write may require the device's recovery method.
 
-Recovery records are retained outside the module at `/data/adb/carlife-on-box/`, including `original.img`, the manifests, recovery manager and `lifecycle.log`. A later Magisk removal cannot delete the only boot backup. If boot was changed independently after installation, rollback preserves it rather than overwriting that newer image; inspect the reported mismatch using the saved backup. An interrupted boot-partition write may require the device's recovery method.
+If boot was written but Magisk did not finish registering the module, use the saved rollback command, reboot and repeat it to finish cleanup; there may be no removal hook left. A rejected profile or failed local patch does not write boot.
 
-If initial installation failed before Magisk registered the module, run the saved rollback command, reboot, then run the same command again to finish cleaning its files. There may be no module removal hook in that case.
+## Build the ZIP
 
-## Build a package
-
-Package building runs on the computer and does not access a device. Python 3.11+ is enough once the [runtime and selector](BUILD_RUNTIME.md) have been built. Supply the target's current Magisk boot, original `init.rc` and `sd-reverse.sh`, firmware fingerprint and active slot. No complete firmware archive, proprietary APK or signing key is needed by this builder.
-
-With an existing authorized ADB connection, collect those inputs without changing the box:
+Build once for the supported firmware profile, then use the ZIP on matching boxes. The computer needs Python 3.11+, the built [runtime and selector](BUILD_RUNTIME.md), and the profile's OEM `init.rc` and `sd-reverse.sh`. **No target boot image, fingerprint, slot selection, complete firmware archive, proprietary APK or signing key is required.** The installed Magisk provides `magiskboot`; no extra Android toolchain is installed.
 
 ```sh
-adb shell getprop ro.boot.slot_suffix
-adb shell getprop ro.build.fingerprint
-# Use the slot reported above; this example is for _a.
-adb exec-out su -c 'cat /dev/block/by-name/boot_a' > target-magisk-boot.img
-adb pull /system/etc/init/hw/init.rc target-init.rc
-adb pull /system/bin/sd-reverse.sh target-sd-reverse.sh
-```
-
-Compute the image's SHA-256 (`shasum -a 256 target-magisk-boot.img` on macOS, or `sha256sum` on Linux) and use the collected values below.
-
-```sh
-python3 scripts/build_magisk_installer.py install \
-  --current-image /path/to/target-magisk-boot.img \
-  --expect-current-sha256 YOUR_BOOT_SHA256 \
+python3 scripts/build_magisk_installer.py universal \
   --init /path/to/system/etc/init/hw/init.rc \
   --oem-script /path/to/system/bin/sd-reverse.sh \
-  --fingerprint 'TARGET_RO_BUILD_FINGERPRINT' \
-  --slot-suffix _a \
   --runtime build/runtime/runtime/boot-native-runtime.tar \
   --runtime-manifest build/runtime/runtime/bundle-manifest.json \
   --selector-release build/runtime/selector \
-  --output build/magisk-install
+  --output build/magisk-universal
 ```
 
-Use the actual slot (`_a` or `_b`). The output contains the ZIP, `manifest.json` and `BUILD.json` with hashes. Preserve the install ZIP: later updates refer to its boot integration.
+The output contains `Carlife_on_box-TBox-Ultra-1-universal.zip`, `manifest.json` and `BUILD.json` with hashes. For a runtime update, run the same command with the new runtime and a fresh output directory. Choose the intended runtime explicitly: packaging an untested audio candidate does not make its audio hardware-accepted.
 
-```sh
-python3 scripts/build_magisk_installer.py update \
-  --base-package build/magisk-install/Carlife_on_box-TBox-Ultra-1-install.zip \
-  --runtime build/runtime-new/runtime/boot-native-runtime.tar \
-  --runtime-manifest build/runtime-new/runtime/bundle-manifest.json \
-  --selector-release build/runtime-new/selector \
-  --output build/magisk-update
-```
-
-An update ZIP contains no boot image. Building the installer does not make an untested audio candidate hardware-accepted; choose the intended runtime explicitly. Use a fresh output directory for each build.
-
-The module follows Magisk's [installer and boot-script lifecycle](https://topjohnwu.github.io/Magisk/guides.html). Initial installation and complete rollback write only the selected boot partition; runtime updates are data-only.
+The module follows Magisk's [installer and boot-script lifecycle](https://topjohnwu.github.io/Magisk/guides.html). “Universal” here means one package for the supported firmware profile, not arbitrary Android boxes.
