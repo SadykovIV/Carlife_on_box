@@ -39,7 +39,7 @@ Keep one owner for registered routes and release them on stop. Stop the current 
 
 For playback behavior:
 
-- MUSIC reflects active media. The candidate stops capture on HU radio selection and sends Android MEDIA_PAUSE; a new media-playback event resumes PCM. Targeted MediaController control and metadata remain follow-up work. Repeated VIDEO_START does not mean Play.
+- MUSIC reflects active media. The candidate stops capture on HU radio selection and sends Android MEDIA_PAUSE; a new media-playback event or explicit MEDIA_PLAY can resume PCM. MUSIC=1 is a status query and cannot undo radio selection. Known idle produces no MEDIA_INIT/PCM. Public media/DPAD hardkeys are now mapped; targeted MediaController control and metadata remain follow-up work. Repeated VIDEO_START does not mean Play.
 - Send speech as INIT → PCM → STOP, without permanently holding an active silent TTS stream. Serialize navigation and assistant speech initially.
 - A spoken prompt ending must not cancel a still-active route. Keep those two reasons for NAVI status separate in existing session state; a new coordinator framework is not required.
 - Account for Android's own audio-focus ducking before adding HU-side attenuation. Resume only previously playing media that the user has not stopped.

@@ -2,7 +2,7 @@
 
 [English](../AUDIO_CANDIDATE.md) · [Главная](../../README.ru.md)
 
-Статус: **код реализован и проверен офлайн; установки и аппаратной приёмки нет**. Сохранён baseline commit `3b344d45ae34df215166385ba0c65f195652f5d8`, MD `347c6ef1…`, runtime `a602efce…`. Изменения находятся в `feature/audio-startup-multitouch`. Во время работы бокс был недоступен. Это отдельный кандидат, не собранная ранее полная прошивка.
+Статус: **код реализован и проверен офлайн; установки и аппаратной приёмки нет**. Сохранён baseline commit `3b344d45ae34df215166385ba0c65f195652f5d8`, MD `347c6ef1…`, runtime `a602efce…`. Аудиокандидат `c7e8cf3` сохранён; последующие исправления находятся в `feature/headswap-compat-review`. Во время работы бокс был недоступен. Это отдельный кандидат, не собранная ранее полная прошивка. См. [разбор всех релизов и оставшихся задач](HEADSWAP_LESSONS.md).
 
 ## Что изменено
 
@@ -22,7 +22,7 @@
 
 Проверен [v1.2.0](https://github.com/YegorkaPomidorka/headswap/releases/tag/v1.2.0), commit `0f5502ab76e2f220b68fa1e2c85b66838f01fd81`, 51commit после прежнего `6835e50`. Новый релиз добавляет два контакта legacy; v1.1.11 содержит также updater и экспериментальное1440p.
 
-HeadSwap получает разделённые MEDIA/SPEECH, голосовые и навигационные события из **Android Auto**. Источника внутреннего Android-звука для нашего бокса там нет. Полезные правила CarLife: INIT перед PCM, MUSIC status, выбор радио, независимость VIDEO_PAUSE, последовательность TTS/VR. ACK аудио AAP, HFP autoplay guard и повторное использование AA-сессии относятся к стороне AA и не перенесены. Источники: [AaBridge](https://github.com/YegorkaPomidorka/headswap/blob/0f5502ab76e2f220b68fa1e2c85b66838f01fd81/android/app/src/main/java/com/yegorkapomidorka/headswap/aa/AaBridge.kt), [CarLifeSession](https://github.com/YegorkaPomidorka/headswap/blob/0f5502ab76e2f220b68fa1e2c85b66838f01fd81/android/app/src/main/java/com/yegorkapomidorka/headswap/CarLifeSession.kt).
+HeadSwap получает разделённые MEDIA/SPEECH, голосовые и навигационные события из **Android Auto**. Источника внутреннего Android-звука для нашего бокса там нет. Полезные правила CarLife: INIT перед PCM, MUSIC status, выбор радио, независимость VIDEO_PAUSE, последовательность TTS/VR. ACK аудио AAP и повторное использование AA-сессии относятся к стороне AA. Автовоспроизведение после Bluetooth возможно и в native Android: этот риск ещё нужно измерить, без переноса таймеров AA вслепую. Источники: [AaBridge](https://github.com/YegorkaPomidorka/headswap/blob/0f5502ab76e2f220b68fa1e2c85b66838f01fd81/android/app/src/main/java/com/yegorkapomidorka/headswap/aa/AaBridge.kt), [CarLifeSession](https://github.com/YegorkaPomidorka/headswap/blob/0f5502ab76e2f220b68fa1e2c85b66838f01fd81/android/app/src/main/java/com/yegorkapomidorka/headswap/CarLifeSession.kt).
 
 GPL-код HeadSwap не скопирован. Независимая реализация использует публичный [контракт Baidu](https://github.com/milesking/apollo-DuerOS/blob/6a07419818f46aadda34c5f55e63d4a1fc8136ef/CarLife-Vehicle-Lib/LibSource/protobuf/proto/CarlifeMusicInitProto.proto) и собственную инфраструктуру MD.
 
@@ -39,6 +39,10 @@ GPL-код HeadSwap не скопирован. Независимая реали
 - Первый раздельный выход — MEDIA + TTS; navigation field6 — совместимый protobuf BOTH. Отдельный VR-выход и заранее захваченная эталонная сессия не являются условиями реализации.
 
 Штатный захват также сопоставлен со [scrcpy AudioDirectCapture](https://github.com/Genymobile/scrcpy/blob/a60891aea193d92e7e5c3942700eca63f9d19a5f/server/src/main/java/com/genymobile/scrcpy/audio/AudioDirectCapture.java) и [AudioRecordReader](https://github.com/Genymobile/scrcpy/blob/a60891aea193d92e7e5c3942700eca63f9d19a5f/server/src/main/java/com/genymobile/scrcpy/audio/AudioRecordReader.java). Его обходы attribution shell и foreground Android 11 автоматически переносить на наш привилегированный Android 15 не требуется: основанием будет конкретная ошибка AudioRecord. Аппаратный capture timestamp — последующее улучшение синхронизации, а не условие обычного PCM. scrcpy используется как источник для сравнения, не как зависимость runtime.
+
+## Исправления тишины и выбора радио
+
+Повторный разбор воспроизвёл и исправил запуск MEDIA при отсутствии воспроизведения и отмену выбора радио опросом `MUSIC=1`. Захват ждёт первого снимка состояния плееров; известный idle не посылает INIT/PCM. Переход в idle останавливает захват. `MUSIC=1` сообщает состояние, а явный MEDIA_PLAY или новый запуск Android-плеера возвращает звук. MEDIA_PAUSE освобождает источник и при недоступном необязательном наблюдателе воспроизведения, без повторной инжекции Pause. При отказе наблюдателя сохранён базовый PCM fallback. Пройдены 77 офлайн-проверок native-аудио; реальный маршрут и поведение ГУ ещё не проверены.
 
 ## Мультитач
 

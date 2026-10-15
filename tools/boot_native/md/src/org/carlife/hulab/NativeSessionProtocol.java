@@ -17,6 +17,25 @@ final class NativeSessionProtocol {
         return major>0&&major<=Integer.MAX_VALUE&&minor>=0&&minor<=Integer.MAX_VALUE?1:2;
     }
     static int fps(int requested){return requested>=1&&requested<=30?requested:30;}
+    /** Baidu CarLife hard-key IDs -> public Android KeyEvent values.
+     * Navigation/voice/rotary need app-specific handling; no AA-private keycodes.
+     */
+    static int androidKeyCode(int key){
+        switch(key){
+            case 0x01:case 0x1e:return 3; // HOME / MAIN
+            case 0x0e:return 4; // BACK
+            case 0x0f:return 88; // SEEK_SUB -> MEDIA_PREVIOUS
+            case 0x10:return 87; // SEEK_ADD -> MEDIA_NEXT
+            case 0x14:return 23; // OK -> DPAD_CENTER
+            case 0x15:return 21; // MOVE_LEFT
+            case 0x16:return 22; // MOVE_RIGHT
+            case 0x17:return 19; // MOVE_UP
+            case 0x18:return 20; // MOVE_DOWN
+            case 0x1f:return 126; // MEDIA_START -> MEDIA_PLAY
+            case 0x20:return 127; // MEDIA_STOP -> MEDIA_PAUSE
+            default:return -1;
+        }
+    }
     static byte[] join(byte[]...parts)throws IOException {
         ByteArrayOutputStream b=new ByteArrayOutputStream();for(byte[]p:parts)b.write(p);return b.toByteArray();
     }

@@ -2,7 +2,7 @@
 
 [Русский](ru/AUDIO_CANDIDATE.md) · [Home](../README.md)
 
-Status: **implemented and tested offline; not installed or hardware accepted**. The preserved reference is commit `3b344d45ae34df215166385ba0c65f195652f5d8`, MD `347c6ef1…`, runtime `a602efce…`. New work is on `feature/audio-startup-multitouch`. The box was unavailable during this work. The candidate is not the existing full-image experiment.
+Status: **implemented and tested offline; not installed or hardware accepted**. The preserved reference is commit `3b344d45ae34df215166385ba0c65f195652f5d8`, MD `347c6ef1…`, runtime `a602efce…`. The audio candidate `c7e8cf3` is preserved; follow-up fixes are on `feature/headswap-compat-review`. The box was unavailable during this work. The candidate is not the existing full-image experiment. See the [release-by-release review and remaining work](HEADSWAP_LESSONS.md).
 
 ## What changed
 
@@ -22,7 +22,7 @@ Audio defaults to **off**. This retains the known projection behavior until an e
 
 Compared [v1.2.0 / 0f5502a](https://github.com/YegorkaPomidorka/headswap/releases/tag/v1.2.0) with [6835e50…0f5502a](https://github.com/YegorkaPomidorka/headswap/compare/6835e50dbc5cd753f8ecfd7e851ad2ac320577ad...0f5502ab76e2f220b68fa1e2c85b66838f01fd81): 51 commits. The new release adds legacy two-contact input; v1.1.11 also adds updater checks and experimental 1440p.
 
-HeadSwap receives already separated MEDIA/SPEECH PCM and navigation/voice events from **Android Auto**. It does not supply a native Android-box output-capture implementation. Its useful CarLife behavior is INIT before PCM, MUSIC state, radio/source switching, independent VIDEO_PAUSE, TTS/VR sequencing and bounded audio. AAP ACK, HFP autoplay suppression and AA warm-session reuse belong to its other side and are not copied into this project. See [AaBridge](https://github.com/YegorkaPomidorka/headswap/blob/0f5502ab76e2f220b68fa1e2c85b66838f01fd81/android/app/src/main/java/com/yegorkapomidorka/headswap/aa/AaBridge.kt) and [CarLifeSession](https://github.com/YegorkaPomidorka/headswap/blob/0f5502ab76e2f220b68fa1e2c85b66838f01fd81/android/app/src/main/java/com/yegorkapomidorka/headswap/CarLifeSession.kt).
+HeadSwap receives already separated MEDIA/SPEECH PCM and navigation/voice events from **Android Auto**. It does not supply a native Android-box output-capture implementation. Its useful CarLife behavior is INIT before PCM, MUSIC state, radio/source switching, independent VIDEO_PAUSE, TTS/VR sequencing and bounded audio. AAP ACK and AA warm-session reuse belong to its other side. Bluetooth-triggered autoplay can also affect native Android: it remains a risk to measure here, without copying AA-specific timer values. See [AaBridge](https://github.com/YegorkaPomidorka/headswap/blob/0f5502ab76e2f220b68fa1e2c85b66838f01fd81/android/app/src/main/java/com/yegorkapomidorka/headswap/aa/AaBridge.kt) and [CarLifeSession](https://github.com/YegorkaPomidorka/headswap/blob/0f5502ab76e2f220b68fa1e2c85b66838f01fd81/android/app/src/main/java/com/yegorkapomidorka/headswap/CarLifeSession.kt).
 
 HeadSwap is GPL-3.0; this implementation independently uses the public Baidu wire contract and the project's own session/queue/input design. No Kotlin application source was copied. [Baidu audio schema](https://github.com/milesking/apollo-DuerOS/blob/6a07419818f46aadda34c5f55e63d4a1fc8136ef/CarLife-Vehicle-Lib/LibSource/protobuf/proto/CarlifeMusicInitProto.proto).
 
@@ -39,6 +39,10 @@ A second source review on 15 October confirmed that upstream still points to v1.
 - Use MEDIA + TTS first and the standard protobuf-compatible navigation BOTH format; separate VR output and an advance reference capture are not prerequisites.
 
 Also compared native capture with [scrcpy AudioDirectCapture](https://github.com/Genymobile/scrcpy/blob/a60891aea193d92e7e5c3942700eca63f9d19a5f/server/src/main/java/com/genymobile/scrcpy/audio/AudioDirectCapture.java) and [AudioRecordReader](https://github.com/Genymobile/scrcpy/blob/a60891aea193d92e7e5c3942700eca63f9d19a5f/server/src/main/java/com/genymobile/scrcpy/audio/AudioRecordReader.java). Its shell attribution and Android 11 foreground workarounds are not automatically needed by this Android 15 privileged runtime. Actual AudioRecord errors should determine any adaptation. Hardware capture timestamps are a later synchronization improvement, not a condition for basic PCM output. scrcpy is a source reference, not a runtime dependency.
+
+## Idle audio and radio corrections
+
+The changelog review reproduced and fixed silent MEDIA startup while Android was idle, and `MUSIC=1` polling incorrectly undoing radio mute. Capture now waits for the initial playback snapshot; known idle emits no INIT/PCM. Idle after playback stops capture. `MUSIC=1` reports state; explicit MEDIA_PLAY or a new Android media start can resume. Explicit MEDIA_PAUSE also releases capture when the optional playback observer is unavailable, without injecting Pause twice. Basic PCM fallback remains available when that observer fails. The native audio suite has 77 passing offline checks; actual routing and HU behavior remain untested.
 
 ## Multitouch
 

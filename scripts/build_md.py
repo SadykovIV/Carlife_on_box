@@ -20,7 +20,7 @@ TESTS = [
     'MdWireTest', 'MdWriterRaceTest', 'MdWatchdogRaceTest', 'DrainUntilStoppedTest',
     'PipelineProgressTest', 'AvcAccessUnitsTest', 'SourceLeaseTest', 'ProjectionTouchTest', 'LegacyMultitouchTest',
     'OemCsdGuardTest', 'AccessoryTransportTest', 'NativeSessionBoundaryTest', 'AsyncRingLogTest',
-    'BootPendingInitTest', 'CarLifeFrameReaderTest', 'NativeCompatibilityTest',
+    'BootPendingInitTest', 'CarLifeFrameReaderTest', 'NativeCompatibilityTest', 'NativePhoneVerificationTest',
     'AccessoryPacketWriteTest', 'NativePauseHeartbeatTest', 'AccessoryProgressDiagnosticsTest',
     'NativeOwnerRetirementTest', 'NativeTouchRecoveryTest', 'NativeLegacyMultitouchTest', 'NativeFeatureResponseDiagnosticsTest',
     'NativeTouchWireDiagnosticsTest', 'NativeAsyncTouchInjectionTest', 'NativeEncoderPriorityTest',

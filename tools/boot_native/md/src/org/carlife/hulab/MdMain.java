@@ -100,7 +100,7 @@ public final class MdMain {
         else verifyDisplay();
         logFields("projection_policy","video_source",videoSource,"video_path",videoPath,"csd_source",csdSource,"touch_profile",touchProfile,"source_display_id",sourceDisplayId,"source_width",displayWidth,"source_height",displayHeight,"source_density_dpi",sourceDensity,"density_provenance",sourceDensity==0?"unknown":"runtime/manual/owned display declared by launcher","compatibility","SELF explicit lab profile");
         if(!nativeUsb){server=new ServerSocket();server.setReuseAddress(true);server.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"),port),1);server.setSoTimeout(1000);}
-        logFields("transport_controller_ready","transport",transportMode,"endpoint",nativeUsb?AndroidAccessoryIo.PATH:"127.0.0.1:"+port,"controller_deadline_uptime_ms",seconds==0?null:deadline,"persistent_controller",seconds==0,"audio_source_requested",audioSource,"audio_capture_verified",false,"auth_provider_available",false,"wire","CarLife 8-byte channel/length then unchanged message header");
+        logFields("transport_controller_ready","transport",transportMode,"endpoint",nativeUsb?AndroidAccessoryIo.PATH:"127.0.0.1:"+port,"controller_deadline_uptime_ms",seconds==0?null:deadline,"persistent_controller",seconds==0,"audio_source_requested",audioSource,"audio_capture_verified",false,"phone_verification","v2_checksum","legacy_rsa_provider_available",false,"wire","CarLife 8-byte channel/length then unchanged message header");
         Thread watchdog=new Thread(new Runnable(){public void run(){
             while(running){
                 if(SystemClock.uptimeMillis()>deadline){log("deadline","server time limit");shutdown();break;}
@@ -206,7 +206,7 @@ public final class MdMain {
         if(id==0x18048||id==0x1804a||id==0x1804c)AUTH_UNAVAILABLE.requireAuthentication(id);
         if(id==0x1806b||id==0x1806d||id==0x1806f)throw new IOException("ENCRYPTION_UNSUPPORTED: no authorized encryption provider for message 0x"+Integer.toHexString(id));
     }
-    static int androidKeyCodeForCarLife(int key){return key==1?KeyEvent.KEYCODE_HOME:key==14?KeyEvent.KEYCODE_BACK:-1;}
+    static int androidKeyCodeForCarLife(int key){return NativeSessionProtocol.androidKeyCode(key);}
     static final class Session {
         final long sessionId=++sessionSequence;
         final MdTransport transport; final DataInputStream in;final OutputStream out;
@@ -228,6 +228,7 @@ public final class MdMain {
         MediaCodecDisplaySource.Selection codecSelection;ProjectionGeometry geometry;
         volatile PendingVideoInit pendingInit;
         Thread writer,captureThread;boolean version=false,paused=false;volatile boolean initialized=false;int width=1280,height=720;long bytes=0,chunks=0,nativeLogicalSession=1;long touchCount=0,touchRecoveries=0,nativeTouchIngressUptime;int touchDiagnosticSamples=0,unknownTouchDiagnosticSamples=0,touchOrdinaryIngress=0,touchPriorityIngress=0,lastTouchShape=-1;
+        NativePhoneVerification phoneVerification;
         int huMajor,huMinor,acceptedFps=30;boolean statisticReplied,moduleStatusSent,featureConfigRecorded;long moduleStatusDue;
         volatile long nativeStartDue;
         long nativePauseHeartbeatDue;
@@ -242,7 +243,7 @@ public final class MdMain {
             transport=t;in=new DataInputStream(t.input());out=t.output();sink=input;sink.configureNativeTouch(t.isNativeUsb());
             playback=new PlaybackActivity(playbackSource,new PlaybackActivity.Listener(){
                 public void changed(long epoch,boolean newMediaStart){playbackChanged(epoch,newMediaStart);}
-                public void degraded(long epoch,String detail){if(!open||!playback.sameEpoch(epoch))return;logFields("audio_playback_monitor","session_id",sessionId,"state","degraded","detail",detail,"fallback","basic PCM; resume by explicit HU MUSIC=1");musicStatusReply();}
+                public void degraded(long epoch,String detail){if(!open||!playback.sameEpoch(epoch))return;logFields("audio_playback_monitor","session_id",sessionId,"state","degraded","detail",detail,"fallback","basic PCM; resume by explicit MEDIA_PLAY hardkey");maybeStartAudio();musicStatusReply();}
             });
             audio=new PcmAudioSession(audioFactory,new PcmAudioSession.Events(){
                 public long now(){return SystemClock.uptimeMillis();}
@@ -252,7 +253,7 @@ public final class MdMain {
         }
         String wireMarker(){return transport.isNativeUsb()?(videoSource.equals("mediacodec")?"DIRECT_USB_AOA;source=MediaCodecDisplaySource;video=ANNEXB_AU;timestamp=ENCODER_PTS_MS":"DIRECT_USB_AOA"):(videoSource.equals("mediacodec")?MediaCodecDisplaySource.WIRE_MARKER:"DEV_STREAM_OVER_ADB");}
         void run()throws IOException {
-            logFields("connected","session_id",sessionId,"transport",transport.name(),"audio_source_requested",audioSource,"mic_auth_encryption","unsupported","wire_marker",wireMarker());
+            logFields("connected","session_id",sessionId,"transport",transport.name(),"audio_source_requested",audioSource,"phone_verification","v2_checksum; legacy_RSA_unsupported","mic_encryption","unsupported","wire_marker",wireMarker());
             writer=new Thread(new Runnable(){public void run(){writeLoop();}},"md-writer");writer.start();
             if(bootReadiness!=null)bootReadiness.commandReady(true);
             CarLifeFrameReader nativeReader=transport.isNativeUsb()?new CarLifeFrameReader(in,new CarLifeFrameReader.Diagnostics(){public void accept(CarLifeFrameReader.Header h){
@@ -301,17 +302,31 @@ public final class MdMain {
         synchronized void maybeStartAudio(){
             if(!open||!version||!audioRequested||!audioNegotiated)return;
             playback.start();
+            // Wait for the first snapshot; a known idle player must not seize
+            // the HU media source with INIT/silent PCM. An unavailable optional
+            // observer explicitly reports outputActive=true for basic fallback.
+            if(!playback.outputActive()){
+                if(audioAttempted||audio.active()){audio.stop();audioAttempted=false;}
+                return;
+            }
             if(audioHuMuted||audioBluetooth||audioAttempted||!audio.retired())return;
             audioAttempted=audio.start();
         }
         synchronized void playbackChanged(long epoch,boolean newMediaStart){
             if(!open||!playback.current(epoch))return;
-            if(audioHuMuted&&newMediaStart){audioHuMuted=false;audioAttempted=false;maybeStartAudio();log("audio_player_resume","new Android media player start after HU mute; PCM level is not a resume signal");}
+            if(audioHuMuted&&newMediaStart){audioHuMuted=false;audioAttempted=false;log("audio_player_resume","new Android media player start after HU mute; PCM level is not a resume signal");}
+            maybeStartAudio();
             musicStatusReply();
         }
-        synchronized void muteAudio(){
+        synchronized void explicitMediaPlay(){
+            // A real Play key may resume; MUSIC=1 is only a status request.
+            audioHuMuted=false;audioAttempted=false;maybeStartAudio();musicStatusReply();
+        }
+        synchronized void explicitMediaPause(){pauseAudio(false);}
+        synchronized void muteAudio(){pauseAudio(true);}
+        private void pauseAudio(boolean injectPause){
             boolean first=!audioHuMuted;audioHuMuted=true;audio.stop();
-            if(first){playback.rebase();if(audioRequested&&audioNegotiated)sink.mediaPause();}
+            if(first){playback.rebase();if(injectPause&&audioRequested&&audioNegotiated)sink.mediaPause();}
             musicStatusReply();
         }
         synchronized void resetAudio(){playback.close();audio.stop();synchronized(audio.queue){audio.queue.clear();audioWireActive=false;pendingMusicStatus=null;}audioNegotiated=false;audioAttempted=false;audioHuMuted=false;audioBluetooth=false;}
@@ -327,7 +342,7 @@ public final class MdMain {
         void audioModuleControl(Map<Integer,Object> fields)throws IOException{
             Proto.requireInts(fields,1,2);int module=Proto.number(fields,1,-1),status=Proto.number(fields,2,-1);
             if(module!=3||!(status==0||status==1)){log("audio_module_control","unsupported module/status "+module+"/"+status);return;}
-            if(status==0)muteAudio();else{audioHuMuted=false;audioAttempted=false;maybeStartAudio();}
+            if(status==0)muteAudio(); // status=1 asks for actual state, not autoplay.
             musicStatusReply();
             logFields("audio_module_control","session_id",sessionId,"music_requested",status==1,"source_enabled",audioRequested,"bluetooth_audio_selected",audioBluetooth);
         }
@@ -419,6 +434,11 @@ public final class MdMain {
             if(ch==CMD&&id==0x18052&&transport.isNativeUsb()&&!featureConfigRecorded){featureConfigRecorded=true;logFields("native_feature_config","session_id",sessionId,"logical_session",nativeLogicalSession,"message_id",id,"payload_length",p.length,"captured_bytes",Math.min(p.length,2048),"payload_hex",Session.hexPrefix(p,2048),"truncated",p.length>2048,"validation","raw HU_FEATURE_CONFIG_RESPONSE before protobuf validation; decode offline");}
             Map<Integer,Object> fields=(ch==CMD||(ch==TOUCH&&id!=0x6800e))?Proto.parse(p):Collections.<Integer,Object>emptyMap();
             if(ch==CMD){
+                if(transport.isNativeUsb()&&id==0x18048){
+                    if(!version||phoneVerification==null)throw new IOException("phone verification requires sent MD_INFO");
+                    send(CMD,0x10049,phoneVerification.response(p));
+                    logFields("phone_verification_response","session_id",sessionId,"logical_session",nativeLogicalSession,"branch","2.0_checksum","identity","exact_sent_MD_INFO","hu_acceptance","await_result");return;
+                }
                 if(transport.isNativeUsb()&&id==0x1804a){Proto.requireInts(fields,1);int result=Proto.number(fields,1,-1);logFields("hu_authen_result","session_id",sessionId,"value",result,"cryptographic_verification_performed_by_md",false);if(result!=1)throw new IOException("HU_AUTHEN_RESULT reported rejection: "+result);return;}
                 rejectMandatoryAuth(id);
                 if(id==0x18001){
@@ -437,7 +457,12 @@ public final class MdMain {
                     huMajor=Proto.number(fields,1,0);huMinor=Proto.number(fields,2,0);nativePauseHeartbeatDue=0;statisticReplied=false;moduleStatusSent=false;moduleStatusDue=0;
                     send(CMD,0x10002,Proto.ints(1,match));version=match==1;if(version)everNegotiated=true;
                     logFields("protocol_version","session_id",sessionId,"major",huMajor,"minor",huMinor,"match_status",match,"profile",nativeCompatibility()?"NATIVE_REFERENCE_COMPAT":"SELF_V1");
-                    if(version&&nativeCompatibility()){send(CMD,0x1001b,NativeSessionProtocol.EMPTY);send(CMD,0x10018,NativeSessionProtocol.EMPTY);send(CMD,0x10004,NativeSessionProtocol.deviceInfo(wireMarker()));moduleStatusDue=SystemClock.uptimeMillis()+500;}
+                    phoneVerification=null;
+                    if(version&&nativeCompatibility()){
+                        byte[] mdInfo=NativeSessionProtocol.deviceInfo(wireMarker());
+                        send(CMD,0x1001b,NativeSessionProtocol.EMPTY);send(CMD,0x10018,NativeSessionProtocol.EMPTY);send(CMD,0x10004,mdInfo);
+                        phoneVerification=new NativePhoneVerification(mdInfo);moduleStatusDue=SystemClock.uptimeMillis()+500;
+                    }
                     if(!version)log("version_rejected","invalid version or unsupported development profile");return;
                 }
                 if(!version)throw new IOException("version required");
@@ -479,7 +504,7 @@ public final class MdMain {
             if(!version||!initialized)throw new IOException("touch requires initialized session");
             if(!transport.isNativeUsb()&&touchCount>200000)throw new IOException("input count limit");
             if(id==0x68001||id==0x6800e||(transport.isNativeUsb()&&TouchFrame.isLegacyStream(id))){sink.wire(id,p,fields,geometry,videoGeneration,this);return;}
-            if(id==0x68008){Proto.requireInts(fields,1);int key=Proto.number(fields,1,-1);if(androidKeyCodeForCarLife(key)>=0)sink.hardkey(key);else log("unsupported","hardkey="+key);return;}
+            if(id==0x68008){Proto.requireInts(fields,1);int key=Proto.number(fields,1,-1);if(androidKeyCodeForCarLife(key)>=0){sink.hardkey(key);if(key==0x1f)explicitMediaPlay();else if(key==0x20)explicitMediaPause();}else log("unsupported","hardkey="+key);return;}
             if(transport.isNativeUsb()){if(unknownTouchDiagnosticSamples<8){unknownTouchDiagnosticSamples++;logFields("native_touch_unknown","session_id",sessionId,"sample",unknownTouchDiagnosticSamples,"limit",8,"message_id",id,"payload_length",p.length);}}else log("unsupported","touchid0x"+Integer.toHexString(id));
         }
         static String touchHex(byte[] p){return hexPrefix(p,64);}

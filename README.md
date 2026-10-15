@@ -27,13 +27,15 @@ A fresh system integration seeds **Baidu CarLife** as the default. A later owner
 | Other Android boxes | Require a device profile and hardware validation |
 | Audio | Opt-in native PCM candidate; offline tests pass, hardware playback unverified |
 | Separate TTS/voice, microphone and navigation metadata | Design documented; native producers not implemented |
-| Head units requiring authentication/encryption | No compatible provider implemented |
+| Phone verification | Native v2 checksum candidate passes offline tests; legacy RSA and media encryption remain unsupported |
 | Honda multitouch | Packet support exists; independent second-finger coordinates were not obtained in the tested mode |
 | Hardware RESET mode switching | Button event and CarPlay dialog verified; actual switch and a three-mode cycle not verified/implemented |
 | Enforcing SELinux deployment | Not validated; the development firmware was already permissive |
 | Latency | Asynchronous input helped; subsequent experiments did not establish a further visible improvement |
 
 The full OTA and proprietary OEM applications are not distributed here. This repository contains source, build tools and tests. Building a JAR successfully does not establish compatibility with a new device or head unit.
+
+[HeadSwap lessons and remaining fixes](docs/HEADSWAP_LESSONS.md) explains the verified gaps, candidate changes and hardware checks still needed.
 
 ## Start here
 
