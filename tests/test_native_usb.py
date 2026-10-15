@@ -413,7 +413,13 @@ class NativeUSBTests(unittest.TestCase):
                         time.sleep(.005)
                     self.assertTrue(predicate(), client.error)
 
-                client.start()
+                def audio_only_decoder(media=client.media):
+                    # This fixture sends no video. Keep the real queue/worker
+                    # shutdown contract without importing optional PyAV.
+                    self.assertIsNone(media.get(), "audio-only fixture received video")
+
+                with patch.object(client, "_decoder", audio_only_decoder):
+                    client.start()
                 wait_for(lambda: client.audio.summary()["lanes"]["MEDIA"]["data_packets"] >= 3)
                 if already_paused:
                     client.pause()
