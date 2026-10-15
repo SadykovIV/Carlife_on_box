@@ -17,6 +17,12 @@ public final class PcmAudioSessionTest {
   final Fake fake=new Fake();final PcmAudioSession a=worker(fake);check(a.start(),"start");check(fake.two.await(2,TimeUnit.SECONDS),"partial reads assembled");
   check(a.queue.poll(1000).id==CarLifeAudio.INIT,"INIT after successful capture");CarLifeAudio.Item x=a.queue.poll(1000),y=a.queue.poll(1000);check(x.payload.length==3840&&y.payload.length==3840&&x.timestamp==1000&&y.timestamp==1020,"20ms sample-count clock from partial reads");
   a.stop();await(new Callable<Boolean>(){public Boolean call(){return a.retired();}},"source retirement");check(fake.closed==1&&!PcmAudioSession.LEASE.isHeld(),"release exactly once; lease free");check(a.queue.poll(1000).id==CarLifeAudio.STOP&&a.queue.size()==0,"one STOP no tail");
+  final long[] startupClock={1000};final Fake delayed=new Fake(){public void start(){super.start();startupClock[0]=7000;}};
+  final PcmAudioSession delayedSession=new PcmAudioSession(new PcmAudioSession.Factory(){public PcmAudioSession.Source create(){return delayed;}},new Events(){public long now(){return startupClock[0];}});
+  delayedSession.start();check(delayed.two.await(2,TimeUnit.SECONDS),"delayed source produces PCM");delayedSession.queue.poll(7000);
+  CarLifeAudio.Item delayedFirst=delayedSession.queue.poll(7000),delayedSecond=delayedSession.queue.poll(7000);
+  check(delayedFirst.timestamp==7000&&delayedSecond.timestamp==7020,"source startup delay is excluded from sample-count timestamp origin");
+  delayedSession.stop();await(new Callable<Boolean>(){public Boolean call(){return delayedSession.retired();}},"delayed source retires");
   final Fake failing=new Fake();failing.fail=true;final PcmAudioSession b=worker(failing);b.start();await(new Callable<Boolean>(){public Boolean call(){return b.retired();}},"failure retires");check(b.error().contains("capture denied")&&failing.closed==1&&!PcmAudioSession.LEASE.isHeld(),"failure recorded with cleanup");
   final CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1);
   final PcmAudioSession c=new PcmAudioSession(new PcmAudioSession.Factory(){public PcmAudioSession.Source create(){return new Fake(){public void start(){entered.countDown();boolean done=false;while(!done)try{release.await();done=true;}catch(InterruptedException e){}}};}},new Events());

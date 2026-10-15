@@ -11,8 +11,8 @@ The reference MD had no PCM source or audio sender; the missing sound was expect
 - Android output capture through `AudioRecord` / `REMOTE_SUBMIX`, requesting and checking 48 kHz, stereo, PCM16. It uses the process's existing privileges; no microphone capture, permission grants, fake attribution context or policy changes.
 - CarLife channel 3 MEDIA: INIT `0x30001`, DATA `0x30006`, STOP `0x30002`. INIT contains rate / channel **count** / bits; PCM is interleaved signed 16-bit little-endian. Twenty milliseconds is 3840 bytes.
 - An independent source lease and a bounded audio queue. At most ten DATA chunks are queued; chunks older than 200 ms are dropped. INIT/STOP remain ordered across restart. Audio capture failure is reported without closing the video session.
-- One transport writer: command priority and alternating ready audio/video work. MUSIC status has its own coalesced, session-tagged slot; it cannot block the writer on its own command queue. Fresh VERSION discards old PCM/status. Video RESET and PAUSE preserve music; HU MUSIC=0 / PAUSE_MEDIA suppress PCM until explicit resumption. This does **not** pause the Android player itself yet.
-- `AUDIO_TRANSMISSION_MODE=1` selects Bluetooth and suppresses USB PCM. This candidate does not implement Bluetooth playback. MUSIC active follows successful transmission of INIT, not merely a capture request.
+- One transport writer: command priority and alternating ready audio/video work. MUSIC status has its own coalesced, session-tagged slot; it cannot block the writer on its own command queue. Fresh VERSION discards old PCM/status. Video RESET and PAUSE preserve music; HU MUSIC=0 / PAUSE_MEDIA stop capture and inject Android MEDIA_PAUSE. Playback callbacks resume PCM on a subsequent media-player start; continuing old PCM or an event marked NAVIGATION/ASSISTANT cannot undo radio selection. Re-registering the callback at HU mute discards older queued events.
+- `AUDIO_TRANSMISSION_MODE=1` selects Bluetooth and suppresses USB PCM. This candidate does not implement Bluetooth playback. MUSIC active requires both transmitted INIT and observed Android output. The playback callback uses one session-owned HandlerThread; it is unregistered on reset/close. If the optional playback API fails, basic PCM remains available with an explicit degraded diagnostic and HU-command resumption.
 - MD progress counters for source activity, nonzero PCM samples, drops and writes. DATA timestamps advance by captured sample count from a monotonic start estimate, modulo 2^32; they are not hardware capture timestamps or proof of AV synchronization.
 - HU MEDIA/TTS parsing, independent lane state, malformed-audio isolation and optional bounded WAV capture (`--audio-capture`). The Mac HU does not play audio live. Raw `rx.bin` already contains received PCM even without WAV capture; treat local traces accordingly.
 
@@ -27,6 +27,18 @@ HeadSwap receives already separated MEDIA/SPEECH PCM and navigation/voice events
 HeadSwap is GPL-3.0; this implementation independently uses the public Baidu wire contract and the project's own session/queue/input design. No Kotlin application source was copied. [Baidu audio schema](https://github.com/milesking/apollo-DuerOS/blob/6a07419818f46aadda34c5f55e63d4a1fc8136ef/CarLife-Vehicle-Lib/LibSource/protobuf/proto/CarlifeMusicInitProto.proto).
 
 Additional functions—separate navigation/voice audio, microphone/assistant, maneuver metadata, media controls and covers—require native producers and coordinated focus. See [CarLife services design](CARLIFE_SERVICES.md). They are not claimed by the mixed MEDIA candidate.
+
+## Re-review corrections
+
+A second source review on 15 October confirmed that upstream still points to v1.2.0 / `0f5502a`. The Baidu MEDIA wire IDs, header and INIT format match the candidate. Further corrections:
+
+- Start the sample-count clock after AudioRecord startup, so source-open time is not added to the timestamp error.
+- A temporary occupied source lease must not mark capture as permanently attempted.
+- Accept the first fresh DOWN after a legacy/ACTION3 format change using the existing CANCEL→DOWN path.
+- Keep the current runtime resolver/version for the audio update; neither a resolver migration nor a Mac HU pre-test is required.
+- Use MEDIA + TTS first and the standard protobuf-compatible navigation BOTH format; separate VR output and an advance reference capture are not prerequisites.
+
+Also compared native capture with [scrcpy AudioDirectCapture](https://github.com/Genymobile/scrcpy/blob/a60891aea193d92e7e5c3942700eca63f9d19a5f/server/src/main/java/com/genymobile/scrcpy/audio/AudioDirectCapture.java) and [AudioRecordReader](https://github.com/Genymobile/scrcpy/blob/a60891aea193d92e7e5c3942700eca63f9d19a5f/server/src/main/java/com/genymobile/scrcpy/audio/AudioRecordReader.java). Its shell attribution and Android 11 foreground workarounds are not automatically needed by this Android 15 privileged runtime. Actual AudioRecord errors should determine any adaptation. Hardware capture timestamps are a later synchronization improvement, not a condition for basic PCM output. scrcpy is a source reference, not a runtime dependency.
 
 ## Multitouch
 
@@ -54,19 +66,20 @@ python3 scripts/build_runtime.py \
   --r8-jar /path/to/r8.jar --java-home "$JAVA_HOME" \
   --clang /path/to/clang --ld-lld /path/to/ld.lld \
   --audio-source remote-submix \
-  --runtime-version boot-native-audio-candidate-20261015 \
   --output build/runtime-audio-candidate
 python3 scripts/test_host.py
 python3 -m unittest discover -s tests -p 'test_boot_native_*.py'
 python3 -m unittest discover -s tests -p test_build_runtime_options.py
 ```
 
-The runtime builder changes only its staging copy. `--audio-source off` is the default. A custom version updates archive/current and both resolver/controller version guards together. It preserves the old version's source/artifacts. A new custom resolver is **not** automatically compatible with the exact resolver migration in `integration/sm6350`; this is a runtime candidate, not an approved full firmware image or a universal install command.
+Keep the default runtime version for this update: the existing resolver, selector, boot hook and observer need no migration. Build into a new local output directory and retain the baseline archive. Update the stopped runtime through the existing payload-update path (MD and launch controller), then start its one existing owner. The optional custom-version flag is for a separate port, not an audio prerequisite. No full firmware image or selector reinstall is needed.
 
-For the first device run, use the existing reviewed single-owner runtime deployment path, retaining its old version, selector and recovery access. Do not launch a second MD beside the boot controller. The MD option itself is `--audio-source remote-submix`; `off` or selecting the retained baseline is the audio rollback.
+The MD option is `--audio-source remote-submix`. Selecting the retained baseline restores the complete prior runtime; `off` disables only the audio source. The installed reference still needs runtime verification of audio permissions and routing, not a new SDK or Android Auto on the box.
 
 ## First hardware experiment
 
-Play a known local stereo test file on the box. Capture the direct-USB MEDIA INIT/DATA with the HU (`--audio-capture --audio-capture-limit-mib 8`) and compare sample rate, channel order, nonzero samples, duration, timestamps and drops. On the actual car HU verify audible left/right sound while video/touch continue. A captured WAV or a successful write alone is not proof of the car speakers playing.
+Start on the actual car HU: play a known local stereo file on the box and verify audible left/right sound while video and touch continue. Record MD source/USB counters. A Mac HU run or WAV capture is an optional diagnostic when sound is absent or distorted, not a prerequisite for trying the car. For that diagnostic, `--audio-capture --audio-capture-limit-mib 8` records PCM format, channels, timestamps and drops; the Mac sink itself does not play audio.
 
-Then test HU radio→CarLife, VIDEO_PAUSE, RESET, disconnect/reconnect, source failure/release, Android local routing restoration and a ten-minute mixed video/audio/touch run. Include navigation and streaming applications before accepting capture coverage. Cold boot timing follows with the HU already ready and stable power; record the physical power event and visible screen alongside protocol logs. Separate TTS/VR and assistant acceptance follow the services plan.
+Then check radio→CarLife, VIDEO_PAUSE, RESET, reconnect and capture release/local-route restoration. Check that the Android player actually handles MEDIA_PAUSE and that its next Play resumes sound; offline callback/key tests do not establish behavior in every player. Follow with a mixed video/audio/touch run and normal applications.
+
+Startup timing and real multi-pointer compatibility can be tested independently of audio. With the HU already ready, record power-on and the visible screen alongside the existing phase logs. Navigation metadata and microphone work can also proceed independently; see the ordered [services plan](CARLIFE_SERVICES.md).

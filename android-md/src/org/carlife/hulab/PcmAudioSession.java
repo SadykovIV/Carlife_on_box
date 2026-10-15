@@ -28,7 +28,7 @@ final class PcmAudioSession {
             if(stop)return;
             source=factory.create();if(source==null)throw new IOException("audio source factory returned null");
             if(stop)return;
-            long origin=now();source.start();
+            source.start();long origin=now();
             synchronized(this){if(stop||!queue.start(token,now()))return;sourceActive=true;started=true;}
             wakeWriter();state("capturing","48000Hz stereo PCM16LE; Android output; not microphone; sample-count timestamps");
             byte[] chunk=new byte[CarLifeAudio.CHUNK_BYTES];int used=0;long frames=0;

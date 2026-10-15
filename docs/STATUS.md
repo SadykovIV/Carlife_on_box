@@ -40,10 +40,9 @@ A complete local candidate was built from the exact reference firmware. All ten 
 
 The candidate is not included here. Releasing a source integration is not a claim that its full image is ready to flash on another TBox.
 
-## Remaining work
+## Remaining work, in priority order
 
-1. Accept the final integrated system image on its actual target, with matching recovery and power.
-2. Validate additional head units and Android-box profiles.
-3. Measure end-to-end touch-to-photon latency; do not infer it by subtracting timestamps from different clocks.
-4. Add and test audio/microphone/voice, required authentication providers and confirmed multi-pointer input where available.
-5. Validate a saved three-mode physical-button flow and enforcing SELinux integration.
+1. Test audible native MEDIA on the car HU and validate player pause/resume for radio transitions.
+2. Separate music and spoken prompts (MEDIA + TTS), then integrate real Yandex maneuvers and HU microphone/assistant input. These are independent development tasks, not prerequisites for ordinary sound.
+3. Measure startup phases and touch latency; validate multi-pointer input on a HU that supplies multiple coordinates. These checks can run alongside audio work.
+4. After the runtime works, build and accept the final image on its intended box. Keep additional board profiles, physical three-mode switching and enforcing SELinux portability as separate compatibility work. Authentication is needed only for a HU that actually requires it.

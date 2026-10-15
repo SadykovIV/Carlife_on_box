@@ -31,7 +31,7 @@ python3 scripts/build_runtime.py \
 
 Это компоненты, а не готовая прошивка. Selector daemon — локальная служба с привилегиями. `OemSelectorUi.java` содержит код интеграции: сборка DEX сама по себе не добавляет пункт в OEM Settings. Необязательный сборщик OEM-патча описан в [BUILD_MD](BUILD_MD.md).
 
-Для отдельного аудиокандидата используйте `--audio-source remote-submix` и отдельный `--runtime-version`: [инструкция](AUDIO_CANDIDATE.md). Эти параметры staging не делают новый resolver автоматически совместимым с адресной миграцией ниже.
+Для аудиообновления используйте `--audio-source remote-submix` со стандартной версией runtime: [инструкция](AUDIO_CANDIDATE.md). Миграция resolver/selector не нужна. `--runtime-version` остаётся необязательным параметром для отдельной интеграции.
 
 ## 3. Создать overlay точной эталонной прошивки
 

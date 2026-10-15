@@ -1,100 +1,69 @@
-# Native CarLife services: separated audio, navigation and voice
+# Native CarLife services: audio, navigation and voice
 
 [Русский](ru/CARLIFE_SERVICES.md) · [Audio candidate](AUDIO_CANDIDATE.md)
 
-This is the implementation design following the 15 October 2026 HeadSwap review. Only the mixed MEDIA candidate and HU audio receiver are implemented at this stage. The owner selected **Yandex Navigator / Yandex Maps** as the first navigation data source. Navigation metadata must come from that application; screen pixels are not the provider.
+The mixed MEDIA source and HU audio receiver are implemented and tested offline. Device sound is not yet verified. Separated audio, navigation metadata and voice below are the next implementation steps, not installed features. The existing video/input baseline stays in place.
 
-## Streams and producers
+## Order of work
 
-| Function | Native Android producer | CarLife destination | Current state |
+1. **Hear Android sound on the HU:** deploy the current candidate, play known media, and check radio switching, stop and reconnect. Reuse the existing USB transport and writer.
+2. **Separate spoken guidance from music:** add an Android output-routing source and TTS packets. Check actual Yandex guidance over music and radio. A third VR output lane is not a prerequisite.
+3. **Add controls and data:** Android MediaSession playback buttons/metadata, Yandex maneuvers, and HU microphone input for a native assistant. These can be developed independently; none requires finishing all other services first.
+
+Boot-time work also remains independent of audio. A box/HU is needed to confirm audible sound, real app data and startup timing, but not to implement protocol handling or run host tests. No new firmware, AA/DHU session or additional framework is required as a preliminary step.
+
+## Sources and destinations
+
+| Function | Android producer | CarLife destination | State |
 | --- | --- | --- | --- |
-| Launcher/map/application picture | Existing EGL/MediaCodec display source | VIDEO channel 2 | Accepted baseline |
-| Music/media | Output PCM; subsequently a MEDIA usage mix | MEDIA channel 3 | Mixed-output candidate, offline tested |
-| Spoken navigation | Navigation app's separate audio usage/session | TTS channel 4 | Designed, no live split tested |
-| Assistant reply | Assistant output usage/session, or our own synthesized PCM | VR channel 5 | Designed, not implemented |
-| Car microphone | HU mic packets `0x58001` | Android recognizer/assistant input | Native routing design, not implemented |
-| Maneuver/road/distance | Yandex application adapter | CMD navigation messages | Provider evidence still required |
-| Music title/cover/progress and playback buttons | Active Android MediaSession | CMD metadata / MediaController actions | Planned separately from PCM |
+| Launcher/map/apps | Existing EGL/MediaCodec display source | VIDEO channel 2 | Accepted baseline |
+| Music and currently mixed output | REMOTE_SUBMIX PCM | MEDIA channel 3 | Implemented candidate |
+| Navigation speech and assistant replies | Separate application output routes | TTS channel 4 initially | Planned |
+| Car microphone | HU channel 5 / `0x58001` | Native Android recognizer/assistant input | Planned |
+| Maneuver/road/distance | **Yandex Navigator / Yandex Maps** adapter | CMD navigation messages | App data still to inspect |
+| Track title/progress and playback buttons | Active Android MediaSession | CMD metadata / MediaController | Planned |
 
-HeadSwap v1.2.0 already receives distinct MEDIA and SPEECH from AA. It sends music to channel 3 and **both navigation speech and assistant replies to channel 4**; it does not currently implement a separate VR output stream. Its AA mic input is also a different endpoint from an Android recorder. The intended three-stream native architecture therefore goes beyond copying HeadSwap. [Pinned AaBridge source](https://github.com/YegorkaPomidorka/headswap/blob/0f5502ab76e2f220b68fa1e2c85b66838f01fd81/android/app/src/main/java/com/yegorkapomidorka/headswap/aa/AaBridge.kt).
+HeadSwap v1.2.0 receives separate MEDIA and SPEECH from AA, sends music to channel 3 and **both navigation speech and assistant replies to TTS channel 4**. We can use that CarLife arrangement with native Android sources. Channel 5 microphone input does not require channel 5 assistant output. A dedicated VR output stream can be added if a concrete HU/use case needs it. [Pinned AaBridge source](https://github.com/YegorkaPomidorka/headswap/blob/0f5502ab76e2f220b68fa1e2c85b66838f01fd81/android/app/src/main/java/com/yegorkapomidorka/headswap/aa/AaBridge.kt).
 
-## Separate output before it is mixed
+## Separate Android audio at the source
 
-A general REMOTE_SUBMIX recording is already mixed: it cannot reliably be separated afterward by amplitude, silence, content-type guesses or multiple recorders on the same address. Public MediaProjection/AudioPlaybackCapture also is not a universal substitute: normal playback capture is limited to MEDIA/GAME/UNKNOWN and obeys application capture policy. It does not by itself supply navigation-guidance or assistant usage streams. [Android capture documentation](https://developer.android.com/media/platform/av-capture).
+The candidate mechanism is a privileged **AudioPolicy**, PLAYERS **AudioMix** routes with `ROUTE_FLAG_LOOP_BACK`, and `AudioPolicy.createAudioRecordSink(mix)`. Each route gets its own address. Initial rules select MEDIA usages UNKNOWN=0 / MEDIA=1 / GAME=14, and navigation usage ASSISTANCE_NAVIGATION_GUIDANCE=12. Assistant usage ASSISTANT=16 can join the speech route or get a separate sink when needed for arbitration; both initially use TTS on the wire. This extends the existing audio worker/writer.
 
-The concrete native candidate is one privileged **AudioPolicy** with distinct **PLAYERS AudioMix** routes, each `ROUTE_FLAG_LOOP_BACK`, and an `AudioRecord` sink per registered address:
+Pure LOOP_BACK redirects selected playback; LOOP_BACK|RENDER copies it and has different capture restrictions. Public AudioPlaybackCapture is limited to eligible MEDIA/GAME/UNKNOWN playback. `allowPrivilegedPlaybackCapture(true)` has low-bandwidth constraints and does not solve full-quality navigation routing. [Android capture documentation](https://developer.android.com/media/platform/av-capture), [AudioPolicy](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/media/java/android/media/audiopolicy/AudioPolicy.java), [native selection rules](https://android.googlesource.com/platform/frameworks/av/+/android-15.0.0_r1/services/audiopolicy/common/managerdefinitions/src/AudioPolicyMix.cpp).
 
-| Lane | Initial disjoint rule | Output |
-| --- | --- | --- |
-| MEDIA | usages UNKNOWN=0, MEDIA=1, GAME=14 | 48 kHz stereo PCM16 → channel 3 |
-| NAV | ASSISTANCE_NAVIGATION_GUIDANCE=12 | measured format → TTS channel 4 |
-| ASSISTANT | ASSISTANT=16 | measured format → VR channel 5 |
+The supplied OEM framework implements these APIs and includes remote submix. Register and test with the existing privileged runtime; the relevant routing permission is `MODIFY_AUDIO_ROUTING`. Static API presence does not establish live routing, but there is no reason to assume a firmware/HAL patch beforehand. A short test with two distinguishable tones from one UID and different usages checks whether each sink gets only its assigned audio.
 
-Use `AudioPolicy.createAudioRecordSink(mix)`. Pure LOOP_BACK routing differs from LOOP_BACK|RENDER playback capture in native policy selection. Do not turn on `allowPrivilegedPlaybackCapture(true)` as a blanket fix: AOSP imposes low-bandwidth privileged-capture constraints, including 16 kHz/mono, and it is not a general high-fidelity bypass. [AudioPolicy](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/media/java/android/media/audiopolicy/AudioPolicy.java), [AudioMix](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/media/java/android/media/audiopolicy/AudioMix.java), [native selection rules](https://android.googlesource.com/platform/frameworks/av/+/android-15.0.0_r1/services/audiopolicy/common/managerdefinitions/src/AudioPolicyMix.cpp).
+Use actual Yandex playback attributes to refine the rules. An app may label speech as MEDIA or delegate playback to another service. UID/session matching is useful when it identifies the intended sound; volume guessing and copying the same PCM into two channels do not separate audio. AudioMix matches different rule dimensions with AND, and values within one dimension with OR. Explicit application device selection may take precedence over a dynamic output mix, so test real playback as well as the two tones.
 
-The supplied OEM Android 15 framework contains these implemented methods and the remote-submix HAL. This makes it a concrete experiment without assuming a firmware/HAL patch. Registration with the existing runtime identity, `MODIFY_AUDIO_ROUTING`, SELinux access and simultaneous mix addresses still need a device test. No existing protection is changed by the prepared source.
+Keep one owner for registered routes and release them on stop. Stop the current address-0 capture before selecting split routing. If registration fails, retain video/input and report the audio error; return to mixed capture after releasing any created routes. Extend the existing bounded audio queues and single USB writer.
 
-Applications may label spoken directions as MEDIA or use a different audio service UID. Measure Yandex/assistant AudioPlaybackConfiguration and attributes first. Refine a rule with actual UID/session where supported; do not route all audio from one navigation-app UID to TTS if that UID also plays unrelated media. Missing attributes remain an observed compatibility issue, not an excuse to duplicate the same mixed PCM into three channels.
+For playback behavior:
 
-One policy owner serializes register/attach/detach/unregister. Each sink has its own source lease, epoch, sample clock, bounded queue and cleanup. Mixed address-0 capture is released before policy mode is enabled. Registration failure keeps the existing video and selected baseline available; a partial failure must remove all successfully registered routes. Fallback to mixed MEDIA is explicit and reported as mixed, not as successful separation.
+- MUSIC reflects active media. The candidate stops capture on HU radio selection and sends Android MEDIA_PAUSE; a new media-playback event resumes PCM. Targeted MediaController control and metadata remain follow-up work. Repeated VIDEO_START does not mean Play.
+- Send speech as INIT → PCM → STOP, without permanently holding an active silent TTS stream. Serialize navigation and assistant speech initially.
+- A spoken prompt ending must not cancel a still-active route. Keep those two reasons for NAVI status separate in existing session state; a new coordinator framework is not required.
+- Account for Android's own audio-focus ducking before adding HU-side attenuation. Resume only previously playing media that the user has not stopped.
 
-## Focus, navigation speech and radio
+## HU microphone and native voice input
 
-An AudioCoordinator owns MUSIC, NAVI and VR state and the transitions on the single USB writer. Audio policy routing is separate from taking over the entire system's audio-focus policy; the latter is not required initially.
+Voice entry arrives as VR module 4 in `MODULE_CONTROL 0x18028`, or a supported VR hardkey. MD requests mic recording with `0x10024`; HU returns channel 5 / `0x58001`; MD ends it with `0x10023`. The initial format is 16 kHz mono PCM16, to confirm against the HU packets. AA ACK windows and packet skipping are unnecessary here.
 
-- MUSIC follows actual source/stream state. HU radio selection suppresses the PCM tail and pauses the selected Android MediaSession when that integration is added. A repeated VIDEO_START must not restart the user's music.
-- NAVI has two independent owners: a live route and an active spoken prompt. Ending a prompt cannot clear the route; ending the route cannot cut an unfinished prompt. Whether NAVI is held throughout a route or only during prompts is an interoperability profile to test against the HU's radio behavior.
-- TTS owns INIT → PCM → STOP for each meaningful prompt session. Do not send permanent silence while announcing an active prompt. Any stop debounce is measured against actual prompt boundaries; HeadSwap's model-specific timers are not universal requirements.
-- VR listening/reply has priority over ordinary media; navigation and assistant speech must not be mixed together by accident. Initially serialize conflicting speech. Drop stale audio rather than resume an old queue.
-- Android may already duck or pause music when a prompt gains focus. Measure where attenuation occurs; do not apply both Android attenuation and another arbitrary reduction at the HU.
-- On reply/route termination, resume only a source that was playing before the temporary interruption and that the HU has not explicitly stopped. Calls/HFP are a separate integration.
+For an existing assistant/keyboard, the candidate is an INJECTOR AudioMix with LOOP_BACK and `AudioPolicy.createAudioTrackSource(mix)`. Match the actual recorder UID and capture preset; add session ID if needed to distinguish concurrent recorders. The OEM framework implements this path. Discover the actual recording service, register the route before its recorder opens, and invoke the normal Android voice action. A late route attachment is not assumed to redirect every existing recorder. [AudioMixingRule](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/media/java/android/media/audiopolicy/AudioMixingRule.java).
 
-The first separation proof is two distinguishable test tones produced by the **same UID**, one MEDIA and one NAVIGATION_GUIDANCE. Two sink recordings must contain only their assigned tone; then test real Yandex guidance over a music app, radio switching and release/reconnect. A total nonzero byte count is not proof of separation.
+This mic route can be tested by itself, before split output exists. It can later share the policy owner. Injected tracks use `USAGE_VIRTUAL_SOURCE=15`, excluded from output sinks. A bounded worker writes PCM without blocking USB reception; cancel/disconnect ends HU recording and releases the track and route. First verify delivery with a target recorder and a control recorder, then a real spoken phrase and assistant reply through TTS. Start with push-to-talk; echo/barge-in is a separate improvement.
 
-## Car microphone into a native assistant
-
-CarLife voice entry is HU MODULE_CONTROL `0x18028` with VR module 4, or a supported VR hardkey. MD requests mic capture using CMD `0x10024`; HU sends channel 5 / `0x58001`; MD ends it with `0x10023`. Initial format candidate is 16 kHz mono PCM16, to be measured on the actual HU. Do not import AA ACK windows or discard the first twenty packets—HeadSwap's current skip count is zero.
-
-The primary native route is a recorder **INJECTOR AudioMix**, `ROUTE_FLAG_LOOP_BACK`, and `AudioPolicy.createAudioTrackSource(mix)`. Injected PCM is matched to the actual recognizer **UID AND capture preset**, with the actual audio session ID when known. Multiple recorders with the same UID/preset require session selection or a single active voice session. The OEM framework contains this implementation and its permission checks. [AudioMixingRule](https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/media/java/android/media/audiopolicy/AudioMixingRule.java).
-
-Determine the recorder identity through privileged recording configuration, register before it opens, then invoke the resolved Android assistant action. The UI package can differ from the recognition-service UID. Do not claim a late route attachment always redirects an already-open recorder. App recording permissions and microphone privacy remain in effect.
-
-Use the same policy owner as output routing. The injector's `USAGE_VIRTUAL_SOURCE=15` is excluded from output sinks, preventing a capture/injection loop. The USB reader enqueues bounded PCM; a separate worker writes AudioTrack. Stop/cancel/disconnect invalidates the voice epoch, ends HU capture, releases the track, detaches the targeted mix and releases VR ownership. Unrelated Android recorders must retain their own inputs.
-
-The alternative for an application-owned voice UI is API 33+ [RecognizerIntent.EXTRA_AUDIO_SOURCE](https://developer.android.com/reference/android/speech/RecognizerIntent#EXTRA_AUDIO_SOURCE): pass a PCM pipe and explicit rate/channels/encoding to SpeechRecognizer. Recognition providers may ignore that extra, so prove it uses the supplied PCM rather than the box microphone. This is not a universal input replacement for any assistant/keyboard. Our own TTS can provide PCM through [UtteranceProgressListener](https://developer.android.com/reference/android/speech/tts/UtteranceProgressListener); avoid both playing and recapturing the same synthesis.
-
-The voice-routing probe uses a known PCM pattern, a targeted ordinary AudioRecord and a second control recorder. Prove delivery to the target, isolation from the control and removal of the route. Then validate a real HU→assistant→HU reply. Begin with push-to-talk; simultaneous listening/reply and wake-word support need measured echo cancellation and their own lifecycle.
+For an application-owned voice UI, API 33+ [RecognizerIntent.EXTRA_AUDIO_SOURCE](https://developer.android.com/reference/android/speech/RecognizerIntent#EXTRA_AUDIO_SOURCE) accepts a PCM pipe and format. It is a simpler alternative if the chosen recognizer supports it; verify that it consumes the supplied PCM. It does not replace the input of arbitrary apps. App recording permissions and microphone privacy still apply. An owned TTS engine can provide PCM through [UtteranceProgressListener](https://developer.android.com/reference/android/speech/tts/UtteranceProgressListener); avoid playing and recapturing the same synthesis twice.
 
 ## Navigation from Yandex Navigator / Maps
 
-There are three distinct results: map pixels in the accepted video stream; spoken guidance in TTS; and semantic maneuvers for the HU/cluster/HUD. The owner explicitly wants the latter from the navigation application.
+Map video, spoken guidance and semantic maneuver data are independent features. The first metadata adapter reads the installed **Yandex Navigator / Yandex Maps**, through an available app interface or its navigation notifications. Inspect a small real route sample and implement the fields it exposes; add other maneuvers and app versions incrementally. A complete fixture catalog is not needed before the first working adapter. Missing data stays unknown.
 
-The first adapter should inspect the **actual installed Yandex app/version**, its supported external interfaces and navigation notifications. `NotificationListenerService` can expose notifications after the owner's access grant, but `CATEGORY_NAVIGATION` defines no standard mandatory maneuver/distance/route schema. Capture real left/right/roundabout/distance/reroute/end samples before implementing an app-specific parser. If data is absent, report that field as unknown; do not invent turn instructions. [NotificationListenerService](https://developer.android.com/reference/android/service/notification/NotificationListenerService).
+`NotificationListenerService` exposes notifications after notification access is granted; `CATEGORY_NAVIGATION` does not define mandatory maneuver/distance fields. Yandex NaviKit provides guidance inside an application using its SDK; it is not a subscription to routes in the installed Navigator/Maps. AndroidX `NavigationManager.updateTrip` is likewise a producer API, not a reader of another app's route. [NotificationListenerService](https://developer.android.com/reference/android/service/notification/NotificationListenerService), [Yandex guidance](https://yandex.com/maps-api/docs/mapkit/android/generated/navigation/guidance.html), [NavigationManager](https://developer.android.com/reference/androidx/car/app/navigation/NavigationManager).
 
-Yandex NaviKit provides typed guidance when integrated into **our own navigation application**. It is not an API to read routes from the installed Yandex Navigator/Maps app. AndroidX `NavigationManager.updateTrip` likewise is a producer API for a participating navigation app and car host, not a generic subscription to another app's route. [Yandex guidance API](https://yandex.com/maps-api/docs/mapkit/android/generated/navigation/guidance.html), [AndroidX NavigationManager](https://developer.android.com/reference/androidx/car/app/navigation/NavigationManager).
+Keep the first implementation small: a Yandex adapter supplies current route/maneuver/distance to the existing CarLife session and CMD writer. Coalesce distance updates, preserve new turns and route end, clear stale data on source loss, and resend a fresh current snapshot after reconnect and subscription. A separate provider/coordinator framework is unnecessary until multiple actual providers need it.
 
-Planned boundary:
+CarLife subscriptions use `0x18043` / reply `0x10044`, START `0x18045`, STOP `0x18046`. Navigation subscription ID is **0**, while functional NAVI module ID is **2**. Maneuver output is `NAVI_NEXT_TURN_INFO=0x10030`; the HU decides where to display it. An active subscription alone does not establish cluster/HUD output.
 
-```text
-Yandex app / verified app adapter
-  → NavigationProvider: route state, maneuver, road, distance, source/sequence/time
-  → NavigationCoordinator: current route + HU subscription + peer schema
-  → bounded latest-distance / preserved turn-and-end events
-  → CarLife CMD writer
-```
+The old Baidu schema uses required **int32 time** at field 6; newer Baidu analysis uses **bytes turnIconData** there. HeadSwap defaults to **BOTH**. Use the same compatibility choice: emit both wire types when an icon is available and retain the time field. Standard protobuf parsers consume their known type and skip the other; the local review verified BOTH against both required-field schemas in either order. TIME/ICON overrides are for observed HU incompatibilities. A separate known-good peer capture is not a prerequisite for implementation. [Old Baidu schema](https://github.com/milesking/apollo-DuerOS/blob/6a07419818f46aadda34c5f55e63d4a1fc8136ef/CarLife-Vehicle-Lib/LibSource/protobuf/proto/CarlifeNaviNextTurnInfoProto.proto), [HeadSwap schema research](https://github.com/YegorkaPomidorka/headswap/blob/0f5502ab76e2f220b68fa1e2c85b66838f01fd81/docs/cluster-metadata-recon.md), [protobuf wire format](https://protobuf.dev/programming-guides/encoding/).
 
-CarLife subscriptions use `0x18043` / reply `0x10044`, START `0x18045`, STOP `0x18046`. Navigation subscription ID is **0**; functional NAVI module ID is **2**. They are different namespaces. Maneuver output is `NAVI_NEXT_TURN_INFO=0x10030`. The HU decides whether to render it on its own screen, forward to a cluster/HUD, or ignore it. A subscription is not proof of visible cluster support.
-
-A real schema conflict must be resolved with peer evidence: the public old Baidu proto has required **int32 time** at field 6; HeadSwap's newer Baidu analysis uses **bytes turnIconData** at that same field number. HeadSwap offers TIME/ICON/BOTH/NONE; emitting both types is not automatically a safe universal choice. Keep explicit profile-specific encoding and validate against a known working session on the target HU. [Old Baidu schema](https://github.com/milesking/apollo-DuerOS/blob/6a07419818f46aadda34c5f55e63d4a1fc8136ef/CarLife-Vehicle-Lib/LibSource/protobuf/proto/CarlifeNaviNextTurnInfoProto.proto), [HeadSwap schema research](https://github.com/YegorkaPomidorka/headswap/blob/0f5502ab76e2f220b68fa1e2c85b66838f01fd81/docs/cluster-metadata-recon.md).
-
-A provider must distinguish no route, active route, reroute, completion and source loss. Source loss is not arrival. Reconnect can replay only a fresh real snapshot after subscription. The existing MD keeps metadata support false until an actual provider and validated encoder exist. No placeholder route is sent during normal driving.
-
-## Implementation order and acceptance
-
-1. **Current candidate:** prove real mixed MEDIA sound through USB while preserving video/input; record release and reconnect behavior.
-2. **Policy routing:** two disjoint output sinks, then real Yandex speech/music and assistant usage. Establish per-lane PTS, INIT/STOP, focus and no duplicate PCM. Extend the existing audio worker/writer; preserve the video architecture.
-3. **Yandex provider and metadata:** collect the actual app contract, implement typed provider/coordinator and the peer's navigation schema; test real maneuvers on the HU and separately on a cluster/HUD if present. Add MediaSession control/metadata using the same genuine producer rule.
-4. **Voice:** targeted recorder-route proof, then HU button/mic→native recognizer→VR reply; cancel, repeated requests, route removal and MEDIA restoration. Validate simultaneous navigation afterward.
-5. **Combined acceptance:** real music + guidance + voice + touch, radio transitions, disconnect/reconnect and cold power-on, with bounded queues and no retained audio routes. A successful API call, packet or synthetic test is recorded separately from a heard/seen user result.
-
-No firmware modification is assumed necessary for these routes. If a concrete runtime rejection requires one, first identify the exact failing API/policy and prepare a scoped change; static method availability alone cannot establish runtime success.
+Advertise navigation metadata once a real provider and encoder are connected, not merely because the HU subscribes. Verify actual maneuvers, route cancellation and reconnect on the HU; check cluster/HUD separately when present. These checks do not delay the first usable music output.

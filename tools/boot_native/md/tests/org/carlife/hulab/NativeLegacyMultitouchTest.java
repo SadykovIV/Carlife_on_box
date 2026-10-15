@@ -60,11 +60,20 @@ public final class NativeLegacyMultitouchTest {
         send(session,0x6800a,"081e1028",320);
         check(sink.rawState.ids.length==1&&sink.rawState.last.xs[0]==30&&sink.rawState.downTime==320,"fresh DOWN cancels old multi gesture then seeds new raw history");
         check(sink.injected.get(2).action==3&&sink.injected.get(3).action==0,"restart preserves CANCEL-before-DOWN order");
-        // ACTION3 cannot silently consume raw legacy IDs: changing family cancels locally.
+        // A new DOWN starts immediately after a negotiated format change. It does
+        // not reuse raw legacy IDs and must cancel the old contact first.
+        int beforeSwitch=sink.injected.size();
         send(session,0x6800e,"0000000007000a0014",330);
-        check(sink.ignoreUntilDown&&sink.rawState.last==null&&session.open,"wire-family switch retains original cancellation rule");
-        send(session,0x6800e,"0000000007000a0014",340);
-        check(sink.state.ids[0]==7&&sink.rawState.last==null,"fresh ACTION3 ID is independent of legacy state");
+        check(!sink.ignoreUntilDown&&sink.rawState.last==null&&sink.state.ids[0]==7&&session.open,"first fresh ACTION3 DOWN starts without an extra tap");
+        check(sink.injected.size()==beforeSwitch+2&&sink.injected.get(beforeSwitch).action==3&&sink.injected.get(beforeSwitch+1).action==0,"wire-family switch orders old CANCEL before fresh DOWN");
+        send(session,0x6800e,"0000000207000b0015",331);
+        check(sink.state.ids[0]==7&&sink.state.last.action==2,"fresh ACTION3 gesture continues after format switch");
+        send(session,0x68001,"0800100c1816",340);
+        check(!sink.ignoreUntilDown&&sink.state.ids[0]==0&&sink.rawState.last.xs[0]==12,"first fresh legacy DOWN also switches back immediately");
+        send(session,0x6800e,"0000000207000d0017",341);
+        check(sink.ignoreUntilDown&&sink.state.last==null&&sink.rawState.last==null&&session.open,"mid-gesture wire-family change still cancels locally");
+        send(session,0x6800e,"0000000007000e0018",342);
+        check(!sink.ignoreUntilDown&&sink.state.ids[0]==7&&sink.rawState.last==null,"fresh DOWN recovers after a mid-gesture format change");
         sink.cancel();
         send(session,0x68005,"080a1014",350);
         check(sink.state.last==null&&session.unknownTouchDiagnosticSamples==1,"discrete click is not fabricated Android CANCEL or DOWN");

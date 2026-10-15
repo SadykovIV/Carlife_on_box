@@ -31,7 +31,7 @@ Use a new output directory. Outputs include:
 
 These are components, not an installable firmware. The selector daemon is a privileged local endpoint. `OemSelectorUi.java` is the reference integration source; merely building its DEX does not add a row to an OEM Settings APK. The optional OEM patch builder is described in [BUILD_MD.md](BUILD_MD.md).
 
-For a separate audio candidate, use `--audio-source remote-submix` and a distinct `--runtime-version`; see [candidate instructions](AUDIO_CANDIDATE.md). These staging options do not make a custom resolver compatible with the pinned system migration below.
+For the audio update, use `--audio-source remote-submix` and keep the default runtime version; see [candidate instructions](AUDIO_CANDIDATE.md). The existing resolver/selector need no migration. `--runtime-version` is optional for separate integration work.
 
 ## 3. Generate the exact reference system overlay
 

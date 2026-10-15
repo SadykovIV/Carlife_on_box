@@ -213,6 +213,7 @@ public final class MdMain {
         final ArrayBlockingQueue<Packet> controls=new ArrayBlockingQueue<Packet>(32),videos=new ArrayBlockingQueue<Packet>(8);
         final Object writerSignal=new Object();
         final PcmAudioSession audio;
+        final PlaybackActivity playback;
         final boolean audioRequested=audioSource.equals("remote-submix");
         boolean audioNegotiated,audioAttempted;
         volatile boolean audioHuMuted,audioBluetooth;
@@ -235,7 +236,14 @@ public final class MdMain {
         Session(MdTransport t)throws IOException{this(t,new InputSink());}
         Session(MdTransport t,InputSink input)throws IOException{this(t,input,new PcmAudioSession.Factory(){public PcmAudioSession.Source create(){return new RemoteSubmixSource();}});}
         Session(MdTransport t,InputSink input,PcmAudioSession.Factory audioFactory)throws IOException{
+            this(t,input,audioFactory,new PlaybackActivity.AndroidSource());
+        }
+        Session(MdTransport t,InputSink input,PcmAudioSession.Factory audioFactory,PlaybackActivity.Source playbackSource)throws IOException{
             transport=t;in=new DataInputStream(t.input());out=t.output();sink=input;sink.configureNativeTouch(t.isNativeUsb());
+            playback=new PlaybackActivity(playbackSource,new PlaybackActivity.Listener(){
+                public void changed(long epoch,boolean newMediaStart){playbackChanged(epoch,newMediaStart);}
+                public void degraded(long epoch,String detail){if(!open||!playback.sameEpoch(epoch))return;logFields("audio_playback_monitor","session_id",sessionId,"state","degraded","detail",detail,"fallback","basic PCM; resume by explicit HU MUSIC=1");musicStatusReply();}
+            });
             audio=new PcmAudioSession(audioFactory,new PcmAudioSession.Events(){
                 public long now(){return SystemClock.uptimeMillis();}
                 public void wakeWriter(){wake();}
@@ -291,29 +299,41 @@ public final class MdMain {
         }
         void wake(){synchronized(writerSignal){writerSignal.notifyAll();}}
         synchronized void maybeStartAudio(){
-            if(!open||!version||!audioRequested||!audioNegotiated||audioHuMuted||audioBluetooth||audioAttempted||!audio.retired())return;
-            audioAttempted=true;audio.start();
+            if(!open||!version||!audioRequested||!audioNegotiated)return;
+            playback.start();
+            if(audioHuMuted||audioBluetooth||audioAttempted||!audio.retired())return;
+            audioAttempted=audio.start();
         }
-        void resetAudio(){audio.stop();synchronized(audio.queue){audio.queue.clear();audioWireActive=false;pendingMusicStatus=null;}audioNegotiated=false;audioAttempted=false;audioHuMuted=false;audioBluetooth=false;}
-        void musicStatusReply(){synchronized(audio.queue){pendingMusicStatus=new MusicStatus(audio.queue.epoch(),audioWireActive&&!audioHuMuted&&!audioBluetooth);}wake();}
+        synchronized void playbackChanged(long epoch,boolean newMediaStart){
+            if(!open||!playback.current(epoch))return;
+            if(audioHuMuted&&newMediaStart){audioHuMuted=false;audioAttempted=false;maybeStartAudio();log("audio_player_resume","new Android media player start after HU mute; PCM level is not a resume signal");}
+            musicStatusReply();
+        }
+        synchronized void muteAudio(){
+            boolean first=!audioHuMuted;audioHuMuted=true;audio.stop();
+            if(first){playback.rebase();if(audioRequested&&audioNegotiated)sink.mediaPause();}
+            musicStatusReply();
+        }
+        synchronized void resetAudio(){playback.close();audio.stop();synchronized(audio.queue){audio.queue.clear();audioWireActive=false;pendingMusicStatus=null;}audioNegotiated=false;audioAttempted=false;audioHuMuted=false;audioBluetooth=false;}
+        void musicStatusReply(){synchronized(audio.queue){pendingMusicStatus=new MusicStatus(audio.queue.epoch(),audioWireActive&&!audioHuMuted&&!audioBluetooth&&playback.outputActive());}wake();}
         void audioWritten(CarLifeAudio.Item sound){
             synchronized(audio.queue){if(!audio.queue.current(sound))return;
                 audio.queue.wrote();if(sound.id!=CarLifeAudio.INIT&&sound.id!=CarLifeAudio.STOP)return;
                 audioWireActive=sound.id==CarLifeAudio.INIT;
-                pendingMusicStatus=new MusicStatus(sound.epoch,audioWireActive&&!audioHuMuted&&!audioBluetooth);
+                pendingMusicStatus=new MusicStatus(sound.epoch,audioWireActive&&!audioHuMuted&&!audioBluetooth&&playback.outputActive());
             }
             logFields("audio_wire_state","session_id",sessionId,"active",sound.id==CarLifeAudio.INIT,"message_id",sound.id,"pcm_format","48000/stereo/s16le");
         }
         void audioModuleControl(Map<Integer,Object> fields)throws IOException{
             Proto.requireInts(fields,1,2);int module=Proto.number(fields,1,-1),status=Proto.number(fields,2,-1);
             if(module!=3||!(status==0||status==1)){log("audio_module_control","unsupported module/status "+module+"/"+status);return;}
-            audioHuMuted=status==0;if(audioHuMuted)audio.stop();else{audioAttempted=false;maybeStartAudio();}
+            if(status==0)muteAudio();else{audioHuMuted=false;audioAttempted=false;maybeStartAudio();}
             musicStatusReply();
             logFields("audio_module_control","session_id",sessionId,"music_requested",status==1,"source_enabled",audioRequested,"bluetooth_audio_selected",audioBluetooth);
         }
         void audioFeatureConfig(byte[] payload){
             try{Integer mode=CarLifeAudio.transmissionMode(payload);if(mode==null)return;
-                if(mode!=0&&mode!=1){logFields("audio_transport_unknown","session_id",sessionId,"mode",mode);return;}
+                if(mode!=0&&mode!=1)logFields("audio_transport_unknown","session_id",sessionId,"mode",mode,"policy","only 1 selects Bluetooth; other values use USB as in HeadSwap");
                 boolean wasBluetooth=audioBluetooth;audioBluetooth=mode==1;
                 if(audioBluetooth)audio.stop();else if(wasBluetooth){audioAttempted=false;maybeStartAudio();}
                 musicStatusReply();
@@ -353,7 +373,7 @@ public final class MdMain {
                 "socket_inflight_started_uptime_ms",PipelineProgress.seen(writeStarted),"socket_inflight_age_ms",PipelineProgress.age(now,writeStarted),"socket_inflight_wire_bytes",inFlight==null?0:inFlight.data.length,"socket_inflight_generation",inFlight==null?null:inFlight.videoGeneration,"stale_enqueue_drops",staleVideoEnqueueDrops.get(),"stale_write_drops",staleVideoWriteDrops.get(),
                 "video_queue_capacity",8,"control_queue_capacity",32,"video_queue_age_budget_ms",2000,"socket_write_stall_budget_ms",3000);
             appendAccessoryProgress(f);
-            audio.queue.appendProgress(f);Collections.addAll(f,"audio_source_active",audio.active(),"audio_wire_active",audioWireActive,"audio_source_error",audio.error());
+            audio.queue.appendProgress(f);Collections.addAll(f,"audio_source_active",audio.active(),"audio_wire_active",audioWireActive,"audio_source_error",audio.error(),"audio_playback_known",playback.known(),"audio_output_active",playback.outputActive());
             if(source!=null)source.appendProgress(f,now);
             logFields("md_progress",f.toArray(new Object[0]));
         }
@@ -422,7 +442,7 @@ public final class MdMain {
                 }
                 if(!version)throw new IOException("version required");
                 if(id==0x18028){audioModuleControl(fields);return;}
-                if(id==0x1800e){audioHuMuted=true;audio.stop();musicStatusReply();log("audio_pause_media","HU paused USB PCM; Android player control is not implemented");return;}
+                if(id==0x1800e){muteAudio();log("audio_pause_media","HU paused USB PCM; Android MEDIA_PAUSE requested");return;}
                 if(id==0x18052){audioFeatureConfig(p);log("native_optional_info","feature config received");return;}
                 if(id==0x18003){if(nativeCompatibility()){log("hu_info","received; MD_INFO already sent with VERSION");return;}send(CMD,0x10004,Proto.strings(1,"Android",7,"hulab-md",14,"CarLife MD video/input pilot",15,wireMarker()));return;}
                 if(nativeCompatibility()&&id==0x18027){if(!statisticReplied){
@@ -523,7 +543,7 @@ public final class MdMain {
             }
         }
         void close(){close("session_close");}
-        void close(String reason){synchronized(this){if(!open)return;noteTerminal(reason);open=false;}audio.stop();audio.queue.clear();wake();try{try{transport.close();}catch(IOException e){log("transport_close_error",e.toString());}stopCapture();sink.cancel();controls.clear();videos.clear();if(writer!=null&&writer!=Thread.currentThread())writer.interrupt();reportProgress("session_closed",mediaSource);logFields("session_closed","session_id",sessionId,"logical_session",nativeLogicalSession,"ever_negotiated",everNegotiated,"terminal_reason",terminalReason,"bytes",bytes,"chunks",chunks,"touches",touchCount);}finally{closeComplete=true;}}
+        void close(String reason){synchronized(this){if(!open)return;noteTerminal(reason);open=false;}playback.close();audio.stop();audio.queue.clear();wake();try{try{transport.close();}catch(IOException e){log("transport_close_error",e.toString());}stopCapture();sink.cancel();controls.clear();videos.clear();if(writer!=null&&writer!=Thread.currentThread())writer.interrupt();reportProgress("session_closed",mediaSource);logFields("session_closed","session_id",sessionId,"logical_session",nativeLogicalSession,"ever_negotiated",everNegotiated,"terminal_reason",terminalReason,"bytes",bytes,"chunks",chunks,"touches",touchCount);}finally{closeComplete=true;}}
     }
     static boolean terminateChild(Process child){
         child.destroy();try{if(child.waitFor(2000,TimeUnit.MILLISECONDS))return true;child.destroyForcibly();return child.waitFor(2000,TimeUnit.MILLISECONDS);}catch(InterruptedException e){Thread.currentThread().interrupt();return !child.isAlive();}
@@ -547,7 +567,10 @@ public final class MdMain {
             else {if(id!=0x68001||touchProfile.equals("action3-multi"))throw new IOException("legacy opcode not enabled by explicit profile");Proto.requireInts(fields,1,2,3);action=Proto.number(fields,1,-1)&255;dual=touchProfile.equals("legacy-dual")||((touchProfile.equals("all-lab")||touchProfile.equals("recognized"))&&fields.containsKey(4)&&fields.containsKey(5));if(touchProfile.equals("legacy-single")&&(fields.containsKey(4)||fields.containsKey(5)))throw new IOException("dual fields outside explicit single profile");if(touchProfile.equals("recognized")&&fields.containsKey(4)!=fields.containsKey(5))throw new IOException("incomplete recognized dual touch coordinate pair");}
             if(ignoreUntilDown&&action!=0){log("touch_ignored","gesture canceled; waiting new DOWN");return;}if(action==0)ignoreUntilDown=false;
             if(frame==null)frame=compatibleLegacy?TouchFrame.legacyCompatible(id,fields,rawState,sourceDisplayId,generation,SystemClock.uptimeMillis()):TouchFrame.legacy(fields,dual,state,sourceDisplayId,generation,SystemClock.uptimeMillis());
-            if(state.last!=null&&!(owner.transport.isNativeUsb()?TouchFrame.sameWireFamily(state.last.source,frame.source):state.last.source.equals(frame.source)))throw new IOException("touch wire profile changed during gesture");
+            // A fresh native DOWN is a new gesture even when the HU changes its
+            // negotiated wire format. The existing CANCEL-before-DOWN path below
+            // retires the old contacts; a mid-gesture format change still cancels.
+            if(state.last!=null&&!(owner.transport.isNativeUsb()&&frame.action==0)&&!(owner.transport.isNativeUsb()?TouchFrame.sameWireFamily(state.last.source,frame.source):state.last.source.equals(frame.source)))throw new IOException("touch wire profile changed during gesture");
             TouchFrame mapped=frame.mapped(geometry);owner.recordTouchMapping(id,frame,mapped,geometry);if(mapped==null){cancel();ignoreUntilDown=true;logFields("touch_outside_viewport","action",action,"policy","reject outside DOWN; CANCEL active gesture; ignore until fresh DOWN","geometry",geometry.toString());return;}
             if(owner.transport.isNativeUsb()&&mapped.action==0&&state.last!=null){
                 if(mapped.repeatsDown(state.last)){owner.recordTouchRecovery(id,raw,fields,"duplicate_down_ignored","same active DOWN/contact/coordinates; Android downTime preserved");return;}
@@ -581,6 +604,10 @@ public final class MdMain {
         }
         synchronized void cancelIfIdle(){if(state.last!=null&&SystemClock.uptimeMillis()-state.last.timeMs>3000){log("touch_timeout","no input update for3s; CANCEL all pointers");cancel();ignoreUntilDown=true;}}
         synchronized void back(){hardkey(14);}
+        synchronized void mediaPause(){
+            try{long t=SystemClock.uptimeMillis();boolean down=event(new KeyEvent(t,t,KeyEvent.ACTION_DOWN,127,0),sourceDisplayId);boolean up=event(new KeyEvent(t,SystemClock.uptimeMillis(),KeyEvent.ACTION_UP,127,0),sourceDisplayId);logFields("audio_player_pause","android_key",127,"accepted",down&&up);}
+            catch(RuntimeException e){logFields("audio_player_pause","android_key",127,"accepted",false,"error",e.toString());}
+        }
         synchronized void hardkey(int key){cancel();int androidKey=androidKeyCodeForCarLife(key);if(androidKey<0)return;long t=SystemClock.uptimeMillis();boolean down=event(new KeyEvent(t,t,KeyEvent.ACTION_DOWN,androidKey,0),sourceDisplayId);boolean up=event(new KeyEvent(t,SystemClock.uptimeMillis(),KeyEvent.ACTION_UP,androidKey,0),sourceDisplayId);logFields("hardkey","carlife_key",key,"android_key",androidKey,"display_id",sourceDisplayId,"accepted",down&&up);}
     }
     /** Independent small proto2 wire implementation; only known unsigned-int/string fields. */
