@@ -37,11 +37,13 @@ The full OTA and proprietary OEM applications are not distributed here. This rep
 
 [Current native services/video candidate](docs/NATIVE_CANDIDATE.md) describes implementation, remaining hardware checks and reproducible builds. The [HeadSwap review](docs/HEADSWAP_LESSONS.md) preserves the earlier findings.
 
-Already running native CarLife? The [Magisk runtime update](docs/MAGISK_RUNTIME_UPDATE.md) packages this candidate with a device-backup rollback, retaining the existing boot integration.
+Already running a manually integrated native CarLife installation? The [Magisk runtime update](docs/MAGISK_RUNTIME_UPDATE.md) retains its existing boot integration. Installations created by the first-install package use that package again for updates.
 
-[Download r6 test release](https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.15-r6): update and rollback ZIPs, short English/Russian instructions and SHA256 checksums. These ZIPs update an existing supported installation; they do not provision a clean box.
+[Download r6 test release](https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.15-r6): first-install ZIP for compatible TBox Ultra 1 firmware, separate legacy runtime update/rollback ZIPs and SHA256 checksums. Follow the short [installation and rollback guide](docs/INSTALL_RELEASE.md) ([Русский](docs/ru/INSTALL_RELEASE.md)) to choose the correct package.
 
 ## Start here
+
+For compatible TBox Ultra 1 firmware, the [Magisk installer](docs/MAGISK_INSTALLER.md) uses one ZIP and saves and patches each box's own boot during installation, without extracting it in advance or replacing the full firmware. Runtime updates and exact rollback are included. Offline checks pass; hardware acceptance on a second box is still pending.
 
 1. [Build the Android MD](docs/BUILD_MD.md) — shared source + native USB overlay, JVM tests and a DEX JAR.
 2. [Build the runtime and system overlay](docs/BUILD_RUNTIME.md) — observer, selector service and exact SM6350 integration.
@@ -88,6 +90,7 @@ The host initiates the Android Open Accessory transition. The box controller own
 | `tools/boot_native/observer` | Authenticated kernel USB event observer |
 | `tools/boot_native/selector` | Saved selection, privileged service and OEM UI integration source |
 | `tools/boot_native/boot` | Early init / dispatcher templates |
+| `tools/magisk` | Magisk installation, runtime updates and exact boot rollback |
 | `integration/sm6350` | Exact reference-firmware system overlay builder and provisioning tests |
 | `hu_lab` | Independent host head unit, native USB, protocol, decode and GUI |
 | `scripts`, `tests` | Portable source builds and offline regressions |

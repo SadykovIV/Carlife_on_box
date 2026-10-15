@@ -37,11 +37,13 @@
 
 [Текущая реализация сервисов и видео](docs/ru/NATIVE_CANDIDATE.md): изменения, ограничения и повторение сборки. [Разбор HeadSwap](docs/ru/HEADSWAP_LESSONS.md) сохраняет прежние результаты.
 
-Если нативный CarLife уже работает, используйте [обновление runtime через Magisk](docs/ru/MAGISK_RUNTIME_UPDATE.md) с возвратом собственной резервной копии бокса и сохранением загрузочной интеграции.
+Для прежней интеграции CarLife, установленной вручную, есть [обновление runtime через Magisk](docs/ru/MAGISK_RUNTIME_UPDATE.md), сохраняющее загрузочную интеграцию. Установки из first-install пакета обновляются повторной установкой этого же пакета новой версии.
 
-[Скачать тестовый релиз r6](https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.15-r6): ZIP обновления и отката, краткая инструкция на русском и английском, SHA256. Эти ZIP обновляют существующую поддерживаемую установку; на чистый бокс CarLife не устанавливают.
+[Скачать тестовый релиз r6](https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.15-r6): first-install ZIP для совместимой прошивки TBox Ultra 1, отдельные ZIP обновления/отката прежней интеграции и SHA256. Выбрать правильный пакет поможет краткая [инструкция по установке и откату](docs/ru/INSTALL_RELEASE.md) ([English](docs/INSTALL_RELEASE.md)).
 
 ## С чего начать
+
+Для совместимой прошивки TBox Ultra 1 [установщик через Magisk](docs/ru/MAGISK_INSTALLER.md) использует один ZIP: во время установки он сохраняет и изменяет собственный boot бокса, без предварительного извлечения образа и замены всей прошивки. Предусмотрены обновление runtime и точный откат. Офлайн-проверки пройдены; аппаратная приёмка на втором боксе ещё предстоит.
 
 1. [Сборка Android MD](docs/ru/BUILD_MD.md) — общий код и native USB overlay, JVM-тесты и DEX JAR.
 2. [Сборка runtime и системного overlay](docs/ru/BUILD_RUNTIME.md) — observer, selector и адресная интеграция SM6350.
@@ -75,6 +77,7 @@ Android display → зеркало / EGL → MediaCodec H.264 → CarLife MD →
 | `tools/boot_native/observer` | Наблюдатель событий USB ядра |
 | `tools/boot_native/selector` | Сохранение режима, privileged service, код интеграции OEM UI |
 | `tools/boot_native/boot` | Шаблоны раннего init и dispatcher |
+| `tools/magisk` | Установка через Magisk, обновление runtime и точный откат boot |
 | `integration/sm6350` | Сборщик overlay точной прошивки и тесты provisioning |
 | `hu_lab` | Хостовый CarLife HU, USB, протокол, декодирование, окно |
 | `scripts`, `tests` | Переносимая сборка и офлайн-регрессии |
