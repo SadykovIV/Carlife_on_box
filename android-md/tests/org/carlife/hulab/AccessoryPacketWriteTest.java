@@ -54,6 +54,13 @@ public final class AccessoryPacketWriteTest {
         check(full.calls.get(3).offset==32776&&full.calls.get(3).requested==5,"last inner tail exact");
         check(Arrays.equals(wire,full.sent.toByteArray()),"wire bytes unchanged across transfer boundaries");stop(t);
 
+        RecordingIo largeIo=new RecordingIo();AccessoryTransport largeTransport=new AccessoryTransport(largeIo);
+        byte[] largeWire=MdMain.packet(2,0x20001,new byte[AvcAccessUnits.MAX_AU],17000);largeTransport.writePacket(largeWire);
+        check(largeWire.length==AvcAccessUnits.MAX_AU+20&&Arrays.equals(largeWire,largeIo.sent.toByteArray()),"2MiB AU plusheaders sent unchanged across1MiB boundary");
+        check(largeIo.calls.get(0).requested==8,"large video retains separate outer8 transfer");
+        boolean largeBounded=true;for(Call call:largeIo.calls)largeBounded&=call.requested<=AccessoryTransport.TRANSFER_BYTES;
+        check(largeBounded,"large video inner still uses <=16KiB USB writes");stop(largeTransport);
+
         RecordingIo shortIo=new RecordingIo();shortIo.maxWrite=3;AccessoryTransport s=new AccessoryTransport(shortIo);
         byte[] small=packet(29);s.writePacket(small);
         check(shortIo.calls.get(0).requested==8&&shortIo.calls.get(1).requested==5&&shortIo.calls.get(2).requested==2,"short outer write retries only remaining outer bytes");

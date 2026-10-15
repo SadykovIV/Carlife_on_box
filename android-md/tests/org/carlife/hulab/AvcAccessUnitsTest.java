@@ -30,6 +30,16 @@ public final class AvcAccessUnitsTest {
   rejects(new Throwing(){public void run()throws Exception{AvcAccessUnits x=new AvcAccessUnits();x.accept(Arrays.copyOfRange(raw,0,10),1,8);x.accept(Arrays.copyOfRange(raw,10,raw.length),2,0);}},"partial PTS mismatch");
   rejects(new Throwing(){public void run()throws Exception{new AvcAccessUnits().accept(new byte[AvcAccessUnits.MAX_AU+1],1,0);}},"bounded AU");
   rejects(new Throwing(){public void run()throws Exception{AvcAccessUnits.normalize(new byte[]{0,0,0,100,0x65});}},"truncated AVCC length");
+  AvcAccessUnits largeAdapter=new AvcAccessUnits();largeAdapter.accept(raw,pts,1);
+  byte[] sceneChange=new byte[550784];Arrays.fill(sceneChange,(byte)0x55);System.arraycopy(new byte[]{0,0,0,1,0x41,(byte)0xb8},0,sceneChange,0,6);
+  AvcAccessUnits.Au large=largeAdapter.accept(sceneChange,pts+33333,0);
+  check(large!=null&&!large.idr&&Arrays.equals(large.bytes,sceneChange),"runtime-sized550784-byte P survives unchanged after IDR");
+  byte[] maximum=Arrays.copyOf(sceneChange,AvcAccessUnits.MAX_AU);Arrays.fill(maximum,sceneChange.length,maximum.length,(byte)0x55);
+  check(largeAdapter.accept(maximum,pts+66666,0).bytes.length==AvcAccessUnits.MAX_AU,"single2MiB complete AU accepted");
+  AvcAccessUnits assembled=new AvcAccessUnits();assembled.accept(raw,pts,1);int split=1100000;
+  check(assembled.accept(Arrays.copyOfRange(maximum,0,split),pts+99999,8)==null,"large partial AU waits for complete boundary");
+  check(Arrays.equals(assembled.accept(Arrays.copyOfRange(maximum,split,maximum.length),pts+99999,0).bytes,maximum),"large partial AU assembled byte-identically within total bound");
+  rejects(()->{AvcAccessUnits x=new AvcAccessUnits();x.accept(new byte[AvcAccessUnits.MAX_AU],1,8);x.accept(new byte[1],1,0);},"partial aggregate over2MiB");
   System.out.println("PASS "+checks+" AVC AU tests using independent libx264 Baseline31 fixture");
  }
 }

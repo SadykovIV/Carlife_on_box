@@ -4,7 +4,7 @@ import java.util.ArrayDeque;
 
 /** Complete video packets only. Never interrupts a packet already owned by the writer. */
 final class VideoQueue<T> {
-    static final int MAX_FRAMES=8, MAX_BYTES=256*1024, MAX_SINGLE_BYTES=512*1024+20;
+    static final int MAX_FRAMES=8, MAX_BYTES=256*1024, MAX_SINGLE_BYTES=AvcAccessUnits.MAX_AU+20;
     static final long MAX_AGE_MS=250, SYNC_INTERVAL_MS=1500;
     interface Adapter<T> {
         int bytes(T packet); long generation(T packet); long queuedAt(T packet);
@@ -36,17 +36,18 @@ final class VideoQueue<T> {
         if(size<0||size>MAX_SINGLE_BYTES){if(!heartbeat)loseChain();dropped++;return false;}
         if(now-adapter.queuedAt(packet)>MAX_AGE_MS){if(!heartbeat)loseChain();dropped++;return false;}
         if(!heartbeat&&awaitingIdr&&!recovery){dropped++;syncPending=true;return false;}
-        if(items.size()>=MAX_FRAMES||(!items.isEmpty()&&bytes+size>MAX_BYTES)||(size>MAX_BYTES&&!recovery)){
+        if(items.size()>=MAX_FRAMES||(!items.isEmpty()&&bytes+size>MAX_BYTES)){
             if(heartbeat){dropped++;return false;}
-            // Let one already queued large IDR reach the writer: rapid following P
-            // frames must not repeatedly erase it before it can ever be displayed.
-            boolean keepLargeIdr=items.size()==1&&bytes>MAX_BYTES&&adapter.recoveryPoint(items.peek())&&!recovery;
-            if(keepLargeIdr){awaitingIdr=true;syncPending=true;pressureEvents++;dropped++;return false;}
+            // Let an admitted large AU reach the writer. If a following P no longer
+            // fits, keep this complete prefix but require a fresh IDR after the loss.
+            boolean keepLargeAu=items.size()==1&&bytes>MAX_BYTES&&!recovery;
+            if(keepLargeAu){awaitingIdr=true;syncPending=true;pressureEvents++;dropped++;return false;}
             loseChain();
             if(!recovery){dropped++;return false;}
         }
         if(!heartbeat&&recovery){awaitingIdr=false;syncPending=false;}
-        // A complete recovery AU may exceed the normal byte budget, alone only.
+        // One complete AU may exceed the normal byte budget, alone only. A large P
+        // reaches here only with an intact dependency chain and an empty queue.
         items.add(packet);bytes+=size;return true;
     }
     synchronized T poll(long currentGeneration,long now){

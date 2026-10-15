@@ -66,7 +66,26 @@ public final class NativeVideoFlowTest {
         check(fps.requested==15&&fps.controls.isEmpty(),"FPS request queues apply, no premature DONE");
         fps.applied=15;fps.completeFrameRateChange();check(read(fps.controls.remove().data).id==0x1000d&&fps.acceptedFps==15,"DONE follows actual applied FPS");
         fps.dispatch(1,0x1800c,MdMain.Proto.ints(1,30));fps.videoGeneration++;fps.applied=30;fps.completeFrameRateChange();check(fps.controls.isEmpty(),"RESET cancels old-generation FPS ACK");
-        fps.supported=false;fps.dispatch(1,0x1800c,MdMain.Proto.ints(1,20));check(fps.controls.isEmpty(),"unsupported pacing cannot claim success");fps.close();
+        fps.supported=false;fps.dispatch(1,0x1800c,MdMain.Proto.ints(1,20));check(fps.controls.isEmpty(),"unsupported pacing cannot claim success");
+        fps.supported=true;fps.codecSelection=new MediaCodecDisplaySource.Selection("TEST","repeat-previous-frame-after","max-fps-to-encoder",1280,720,30);
+        fps.requested=0;fps.dispatch(1,0x1800c,MdMain.Proto.ints(1,60));check(fps.requested==0&&fps.controls.isEmpty(),"HU FPS cannot exceed accepted encoder capacity");
+        fps.codecSelection=new MediaCodecDisplaySource.Selection("TEST","repeat-previous-frame-after","max-fps-to-encoder",1280,720,60);
+        fps.applied=30;fps.dispatch(1,0x1800c,MdMain.Proto.ints(1,60));check(fps.requested==60&&fps.controls.isEmpty(),"60 FPS admitted only after adequate encoder selection; waits actual pacing");
+        fps.applied=60;fps.completeFrameRateChange();check(read(fps.controls.remove().data).id==0x1000d&&fps.acceptedFps==60,"60 FPS command ACK follows pacing confirmation");
+        fps.dispatch(1,0x1800c,MdMain.Proto.ints(1,15));fps.applied=15;fps.completeFrameRateChange();check(read(fps.controls.remove().data).id==0x1000d&&fps.acceptedFps==15,"HU can reduce manually selected60 FPS");fps.close();
+        // Native protocol v1 uses the same bounded AU admission, independent of handshake features.
+        MdMain.Session v1=new MdMain.Session(new Transport());ready(v1);v1.huMajor=1;
+        AvcAccessUnits.Au scene=au(false,550784,2400000);
+        v1.sendAccessUnit(scene,7);check(v1.nativeVideos.isEmpty()&&v1.nativeVideos.snapshot(1000).awaitingIdr,"large P cannot start native v1 decoder without real IDR");
+        v1.sendAccessUnit(recovery,7);check(v1.videos.isEmpty()&&v1.nativeVideos.poll(7,1000)!=null,"native v1 uses bounded native queue rather than legacy blocking queue");
+        v1.sendAccessUnit(scene,7);
+        MdMain.Packet scenePacket=v1.nativeVideos.poll(7,1000);
+        check(scenePacket!=null&&Arrays.equals(read(scenePacket.data).payload,scene.bytes)&&v1.open,"native v1 large scene-change P reaches unchanged wire");
+        v1.sendAccessUnit(au(false,AvcAccessUnits.MAX_AU,2500000),7);
+        check(v1.nativeVideos.snapshot(1000).bytes==AvcAccessUnits.MAX_AU+20,"maximum completeAU is bounded one packet");
+        v1.videoGeneration++;check(v1.nativeVideos.poll(8,1000)==null,"RESET cancels pending largeAU");
+        v1.sendAccessUnit(scene,8);check(v1.nativeVideos.isEmpty(),"RESET-cleared native queue rejects even valid large P until current IDR");
+        v1.sendAccessUnit(recovery,8);check(v1.nativeVideos.poll(8,1000)!=null,"real current-generation IDR restores native chain after RESET");v1.close();
         android.os.SystemClock.fixedTime=-1;
         System.out.println("PASS "+checks+" native video admission/recovery/writer/FPS completion checks; no hardware claim");
     }

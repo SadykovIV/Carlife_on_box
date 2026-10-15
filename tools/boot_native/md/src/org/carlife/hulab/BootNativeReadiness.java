@@ -16,7 +16,8 @@ final class BootNativeReadiness implements Runnable {
     private volatile String stage="BOOTSTRAP",failure="";
     private Thread worker;
     private long sequence,lastWaitingLog;
-    private String lastPublished="";
+    private String lastPublished="",lastVideoStatus="";
+    private long nextSettingsStatusAttempt;
     private MediaCodecDisplaySource.Selection defaultSelection;
 
     BootNativeReadiness(String path,String nonce)throws Exception {
@@ -86,9 +87,33 @@ final class BootNativeReadiness implements Runnable {
                 PendingVideoInit ticket=s==null?null:s.pendingInit;
                 if(mediaReady&&ticket!=null&&ticket.current(s.pendingInit,s.videoGeneration,s.open)){
                     try {
-                        MediaCodecDisplaySource.Selection selected=ticket.width==1280&&ticket.height==720&&ticket.fps==30?defaultSelection:MdMain.selectOutput(ticket.width,ticket.height,ticket.fps,true);
+                        int width=ticket.width,height=ticket.height,fps=ticket.fps;
+                        String mode=MdMain.nativeVideoMode;
+                        if(s.transport.isNativeUsb()){
+                            NativeVideoConfig config=s.cachedVideoConfig(ticket);
+                            if(config==null){
+                                NativeVideoConfig observed;
+                                try{observed=NativeVideoSettings.read();}
+                                catch(Exception unavailable){observed=NativeVideoConfig.DEFAULT;MdMain.logFields("video_settings_unavailable","error",unavailable.toString(),"fallback","auto:auto; HU hint and codec capability; next logical session retries");}
+                                config=s.acceptVideoConfig(ticket,observed);
+                            }
+                            if(config==null)continue;
+                            VideoMode requested=config.requested(ticket.hintWidth,ticket.hintHeight,ticket.hintFps);
+                            width=requested.width;height=requested.height;fps=requested.fps;mode=config.mode;
+                            MdMain.logFields("video_settings_snapshot","session_id",s.sessionId,"logical_session",s.nativeLogicalSession,"generation",ticket.generation,"configuration",config.encoded(),"provenance",config.provenance,"hu_width",ticket.hintWidth,"hu_height",ticket.hintHeight,"hu_fps",ticket.hintFps,"requested_width",width,"requested_height",height,"requested_fps",fps,"changes_apply","next logical VERSION session");
+                        }
+                        if(!ticket.current(s.pendingInit,s.videoGeneration,s.open))continue;
+                        MediaCodecDisplaySource.Selection selected=width==1280&&height==720&&fps==30?defaultSelection:MdMain.selectOutput(width,height,fps,true,mode);
                         s.completeBootInit(ticket,selected);
-                    }catch(Exception e){MdMain.logFields("boot_media_init_failed","session_id",s.sessionId,"generation",ticket.generation,"error",e.toString(),"init_done_sent",false);s.close();}
+                    }catch(Exception e){boolean current=s.failBootInitIfCurrent(ticket);MdMain.logFields("boot_media_init_failed","session_id",s.sessionId,"generation",ticket.generation,"error",e.toString(),"init_done_sent",false,"current_ticket",current);}
+                }
+                // Optional status must not spawn the platform settings CLI while media services are still starting.
+                // A failed SettingsProvider status write never closes an otherwise working USB session.
+                String status=s==null?"No active CarLife session":s.videoSettingsStatus;
+                long now=SystemClock.uptimeMillis();
+                if(mediaReady&&status!=null&&!status.equals(lastVideoStatus)&&now>=nextSettingsStatusAttempt){
+                    try{NativeVideoSettings.publish(status);lastVideoStatus=status;}
+                    catch(Exception unavailable){nextSettingsStatusAttempt=now+5000;MdMain.logFields("video_status_unavailable","error",unavailable.toString(),"session_affected",false);}
                 }
                 Thread.sleep(mediaReady?100:deadlineReported?1000:250);
             }catch(InterruptedException e){if(stopped)break;Thread.currentThread().interrupt();break;}

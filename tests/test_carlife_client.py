@@ -111,6 +111,25 @@ def socket_pressure_probe():
 
 
 class ClientTests(unittest.TestCase):
+    def test_first_large_au_with_sps_is_not_rejected_as_missing_sps(self):
+        fixture = Path(__file__).resolve().parents[1] / "android-md/tests/fixtures/mode-qcom-captured-1920x1080-l40.csd.hex"
+        csd = bytes.fromhex(fixture.read_text())
+        with tempfile.TemporaryDirectory() as output:
+            client = HUClient("127.0.0.1", 1, output)
+            client.session.accepted = {"width": 1920, "height": 1080, "fps": 30}
+            client._inspect_sps(csd + b"\x00\x00\x00\x01\x65" + b"\x55" * (1024 * 1024))
+            self.assertEqual(client.sps["display_width"], 1920)
+            self.assertFalse(client.sps_validation["failures"])
+            self.assertFalse(client._sps_prefix)
+            client.stop()
+
+    def test_large_bootstrap_without_sps_remains_bounded(self):
+        with tempfile.TemporaryDirectory() as output:
+            client = HUClient("127.0.0.1", 1, output)
+            with self.assertRaisesRegex(ProtocolError, "no complete SPS"):
+                client._inspect_sps(b"\x55" * (1024 * 1024 + 1))
+            client.stop()
+
     def test_real_socket_pressure_and_queue_full_stop(self):
         result = socket_pressure_probe()
         if result["pressure_precondition"] != "PASS":

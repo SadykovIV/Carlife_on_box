@@ -28,8 +28,8 @@ public final class VideoModeTest {
             if(row[1]==1080)check(parsed.codedMacroblocks==120*68,"1088 coded lines crop to1080");
             AvcAccessUnits guarded=new AvcAccessUnits(true,mode);guarded.addFormatCsd(csd);check(guarded.accept(csd,0,2)==null,"unchanged higher-level CSD valid "+mode);
             final byte[] changed=csd.clone();changed[7]=10;
-            if(row[2]==31)check(guarded.accept(changed,0,2)==null,"existing proven31->10 guard remains");
-            else{final AvcAccessUnits strict=guarded;rejects(new Task(){public void run()throws Exception{strict.accept(changed,0,2);}},"higher levels must not inherit OEM overwrite exception");}
+            if(row[2]==31||row[2]==40)check(guarded.accept(changed,0,2)==null,"runtime-proven31/40->10 guard applies after requested-mode validation");
+            else{final AvcAccessUnits strict=guarded;rejects(new Task(){public void run()throws Exception{strict.accept(changed,0,2);}},"unproven32/42 levels must not inherit OEM overwrite exception");}
             for(int n=0;n<sps.length;n++){final byte[] cut=Arrays.copyOf(sps,n);rejects(new Task(){public void run()throws Exception{AvcSps.parse(cut);}},"truncated SPS "+n);}
             final byte[] wrong=sps.clone();wrong[3]=(byte)(row[2]==31?32:31);rejects(new Task(){public void run()throws Exception{mode.validateSps(wrong);}},"mismatched actual level");
             ProjectionGeometry g=mode.geometry(1920,1080);for(float[] p:new float[][]{{20,20},{1899,1059},{959.5f,539.5f}}){float[] v=g.toVideo(p[0],p[1]),back=g.toSource(v[0],v[1]);check(back!=null&&Math.abs(back[0]-p[0])<.01&&Math.abs(back[1]-p[1])<.01,"video/input same mode inverse");}

@@ -134,3 +134,62 @@ def parse_sps(payload):
                 vui["timing_note"] = "SPS VUI signalling, not measured timestamps or achieved capture FPS"
     result["vui"] = vui
     return result
+
+
+# H.264 Annex A / Android MediaCodecInfo AVC level limits:
+# level_idc -> (MaxFS, MaxMBPS, MaxDpbMbs). Keep measurements distinct from signalling.
+AVC_LEVEL_LIMITS = {
+    10: (99, 1485, 396),
+    31: (3600, 108000, 18000),
+    32: (5120, 216000, 20480),
+    40: (8192, 245760, 32768),
+    41: (8192, 245760, 32768),
+    42: (8704, 522240, 34816),
+}
+
+
+def validate_sps_mode(sps, accepted=None, expected_baseline=False):
+    """Check actual SPS against its level and accepted INIT_DONE mode, not a fixed 720p.
+
+    Accepted FPS is an encoder contract. The separate PTS analysis measures achieved
+    output rate; this function never substitutes VUI signalling for that measurement.
+    """
+    mbs = (sps["coded_width"] // 16) * (sps["coded_height"] // 16)
+    level, profile = sps["level_idc"], sps["profile_idc"]
+    limits = AVC_LEVEL_LIMITS.get(level)
+    fs, mbps, dpb = limits if limits is not None else (None, None, None)
+    failures = []
+    if expected_baseline and profile != 66:
+        failures.append("FAIL_REQUESTED_BASELINE")
+    if fs is not None and mbs > fs:
+        failures.append("FAIL_LEVEL_MAXFS")
+    references = sps["max_num_ref_frames"]
+    if references > 16 or (dpb is not None and references * mbs > dpb):
+        failures.append("FAIL_LEVEL_MAXDPB")
+    mode = None
+    if accepted is not None:
+        mode = {name: accepted[name] for name in ("width", "height", "fps")}
+        if (sps["display_width"], sps["display_height"]) != (mode["width"], mode["height"]):
+            failures.append("FAIL_ACCEPTED_GEOMETRY")
+        if mbps is not None and mbs * mode["fps"] > mbps:
+            failures.append("FAIL_LEVEL_MAXMBPS")
+    if failures:
+        status = failures[0]
+    elif limits is None:
+        status = "PARTIAL_UNKNOWN_LEVEL"
+    elif expected_baseline:
+        # Preserve the historical 720p summary name; extra checks are explicit below.
+        suffix = "MAXFS" if level == 31 or mode is None else "MODE_LIMITS"
+        status = f"PASS_BASELINE_L{level}_{suffix}"
+    else:
+        status = "PARTIAL_CHECK_ONLY"
+    return {
+        "status": status, "failures": failures,
+        "coded_macroblocks": mbs, "level_max_fs": fs,
+        "level_max_mbps": mbps, "level_max_dpb_macroblocks": dpb,
+        "sps_reference_macroblocks": references * mbs,
+        "accepted_mode_checked": mode,
+        "accepted_mode_macroblocks_per_second": mbs * mode["fps"] if mode else None,
+        "decoder_policy": "permissive diagnostic decode; not automotive acceptance",
+        "remaining_checks": "Achieved MBPS assessed separately from actual quantized PTS; HRD/bitrate and target HU acceptance not fully validated",
+    }

@@ -27,7 +27,7 @@ TESTS = [
     'VideoDiagnosticPolicyTest', 'NativeVideoDiagnosticsEntryTest',
     'CarLifeAudioTest', 'PcmAudioSessionTest', 'NativeAudioSessionTest',
     'SplitAudioSourceTest', 'VideoQueueTest', 'VideoRateControlTest', 'FrameRatePacingTest',
-    'NativeVideoFlowTest', 'VideoModeTest', 'NativeSplitAudioSessionTest', 'NativeServicesTest', 'NativeServicesStartupTest', 'NativeVoiceQueueTest', 'NativeServicesSessionTest',
+    'NativeVideoFlowTest', 'NativeVideoConfigTest', 'NativeVideoSettingsCommandTest', 'VideoModeTest', 'NativeSplitAudioSessionTest', 'NativeServicesTest', 'NativeServicesStartupTest', 'NativeVoiceQueueTest', 'NativeServicesSessionTest',
 ]
 
 

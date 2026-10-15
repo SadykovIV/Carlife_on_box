@@ -8,7 +8,7 @@ import java.util.List;
 
 /** Codec-buffer AU adapter. Never edits NAL payloads or SPS; container prefixes only. */
 final class AvcAccessUnits {
-    static final int MAX_AU = 512 * 1024;
+    static final int MAX_AU = 2 * 1024 * 1024;
     static final int CONFIG = 2, PARTIAL = 8;
     static final byte[] START = {0, 0, 0, 1};
     private byte[] sps, pps;
@@ -39,12 +39,20 @@ final class AvcAccessUnits {
         boolean gotSps=false,gotPps=false;
         for(byte[] nal:split(normalize(raw))){
             int t=nal[0]&31;
-            if(t==7){gotSps=true;if(nal.length!=formatSps.length)throw new IOException("OEM CSD conflict changes SPS length");for(int i=0;i<nal.length;i++)if(nal[i]!=formatSps[i]&&!(i==3&&(nal[i]&255)==10&&(formatSps[i]&255)==31))throw new IOException("OEM CSD conflict beyond proven level_idc overwrite");}
+            if(t==7){gotSps=true;if(nal.length!=formatSps.length)throw new IOException("OEM CSD conflict changes SPS length");for(int i=0;i<nal.length;i++)if(nal[i]!=formatSps[i]&&!provenLevelOverwrite(i,nal[i],formatSps[i]))throw new IOException("OEM CSD conflict beyond proven level_idc overwrite");}
             else if(t==8){gotPps=true;if(!Arrays.equals(nal,formatPps))throw new IOException("OEM CSD conflict changes PPS");}
             else throw new IOException("unexpected NAL in guarded codec config");
         }
         if(!gotSps||!gotPps)throw new IOException("guarded config missing SPS/PPS");
         guardedConfigs++;
+    }
+
+    private boolean provenLevelOverwrite(int index,byte raw,byte original){
+        if(index!=3||(raw&255)!=10)return false;
+        int level=original&255;
+        // Same pinned libstagefright overwrite observed in the accepted 720p31
+        // and captured 1080p40 runs. Geometry/level/DPB validation is still mandatory.
+        return level==31||level==40&&expectedMode!=null&&expectedMode.levelIdc==40;
     }
 
     static final class Au {
@@ -68,7 +76,7 @@ final class AvcAccessUnits {
     }
 
     Au accept(byte[] raw, long ptsUs, int flags) throws IOException {
-        if (raw.length>MAX_AU) throw new IOException("codec buffer exceeds 512KiB AU bound");
+        if (raw.length>MAX_AU) throw new IOException("codec buffer exceeds 2MiB AU bound");
         if ((flags&CONFIG)!=0) { if(originalFormatGuard)guardedConfig(raw);else addCsd(raw); return null; }
         if (partial!=null || (flags&PARTIAL)!=0) {
             if (partial==null) { partial=new ByteArrayOutputStream(); partialPts=ptsUs; partialFlags=0; }
@@ -103,7 +111,7 @@ final class AvcAccessUnits {
             }
             sawIdr=true;
         }
-        if(annex.length>MAX_AU)throw new IOException("complete AU+CSD exceeds 512KiB bound");
+        if(annex.length>MAX_AU)throw new IOException("complete AU+CSD exceeds 2MiB bound");
         return new Au(annex,ptsUs,flags,idr,types.toString());
     }
 

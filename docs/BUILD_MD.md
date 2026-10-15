@@ -40,7 +40,7 @@ Output:
 - `build/md/manifest.json`: source/tool hashes and the test result.
 - `build/md/*.stdout.txt`, `*.stderr.txt`, `steps.json`: local build evidence.
 
-Use `--output /path/to/output` to keep a separate build. Test-only mode compiles both source layers and runs all 31 JVM suites without requiring D8:
+Use `--output /path/to/output` to keep a separate build. Test-only mode compiles both source layers and runs all 45 JVM suites without requiring D8:
 
 ```sh
 python3 scripts/build_md.py --test-only
@@ -99,3 +99,13 @@ python3 scripts/build_oem_selector.py \
 | Certificate, DER encoding | `c8a2e9bccf597c2fb6dc66bee293fc13f2fc47ec77bc6b2b0d52c11f51192ab8` |
 
 The tool checks the expected wrapped-method count and that unrelated APK entries, including manifests, resources and native libraries, remain byte-identical. It writes `MainAiBox-selector.apk`, `SudingSettings-selector.apk` and a local build manifest. Both output signatures were verified during publication preparation. This is an offline patch build; installation and target-device compatibility are separate. The root selector daemon/runtime bundle is built separately with `scripts/build_runtime.py`.
+
+## r7 exact runtime reproduction
+
+The r7 runtime was rebuilt from the release source with JDK 17.0.16, Android API 35 and **R8/D8 8.3.37**. Its JAR matches the tested `video4` artifact byte for byte:
+
+```text
+921134a31f6bc403ae6b8e66f4c93741d327a0138349068e1e8f52d9aa861754  md-boot-native.jar
+```
+
+Use `--r8-jar` to select that compiler explicitly. The R8 bundled in a newer SDK may produce different DEX bytes even when the source and all tests match. The r7 package contains the exact tested artifact. For the accompanying Settings-only module, see [Build the video settings overlay](BUILD_VIDEO_SETTINGS.md).

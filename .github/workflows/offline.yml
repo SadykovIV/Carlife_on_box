@@ -23,6 +23,8 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_boot_native_*.py'
       - name: Candidate runtime packaging options
         run: python -m unittest discover -s tests -p test_build_runtime_options.py
+      - name: Video settings overlay packaging
+        run: python -m unittest discover -s tests -p test_video_settings_overlay.py
       - name: Saved selector tests
         run: python -m unittest discover -s tools/boot_native/selector/tests -p 'test_*.py'
       - name: System provisioning against synthetic fixtures

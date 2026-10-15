@@ -687,30 +687,19 @@ class HUClient:
         if self.sps is not None:
             return
         self._sps_prefix.extend(data)
-        if len(self._sps_prefix) > 1024 * 1024:
-            raise ProtocolError("no complete SPS in bounded bootstrap prefix")
         starts = list(re.finditer(b"\x00\x00(?:\x00)?\x01", self._sps_prefix))
         for marker, nxt in zip(starts, starts[1:]):
             offset = marker.end()
             if self._sps_prefix[offset] & 31 == 7:
-                from .h264 import parse_sps
+                from .h264 import parse_sps, validate_sps_mode
                 self.sps = parse_sps(bytes(self._sps_prefix[offset + 1:nxt.start()]))
-                mbs = (self.sps["coded_width"] // 16) * (self.sps["coded_height"] // 16)
-                level, profile = self.sps["level_idc"], self.sps["profile_idc"]
-                fs_limit = {10: 99, 31: 3600}.get(level)
-                violation = fs_limit is not None and mbs > fs_limit
-                status = "FAIL_LEVEL_MAXFS" if violation else "PARTIAL_CHECK_ONLY"
-                if self.source_name == "MediaCodecDisplaySource":
-                    status = ("PASS_BASELINE_L31_MAXFS" if profile == 66 and level == 31 and mbs <= 3600
-                              else "FAIL_REQUESTED_BASELINE_L31")
-                self.sps_validation = {"status": status,
-                    "coded_macroblocks": mbs, "level_max_fs": fs_limit,
-                    "level_max_mbps": 108000 if level == 31 else None,
-                    "decoder_policy": "permissive diagnostic decode; not automotive acceptance",
-                    "remaining_checks": "MBPS assessed separately from actual quantized PTS; DPB/HRD/bitrate and target HU acceptance not fully validated"}
+                self.sps_validation = validate_sps_mode(self.sps, accepted=self.session.accepted,
+                    expected_baseline=self.source_name == "MediaCodecDisplaySource")
                 self.trace.event("sps", parsed=self.sps, validation=self.sps_validation)
                 self._sps_prefix.clear()
                 break
+        if self.sps is None and len(self._sps_prefix) > 1024 * 1024:
+            raise ProtocolError("no complete SPS in bounded bootstrap prefix")
 
     def _decoder(self):
         import av

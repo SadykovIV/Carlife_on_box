@@ -19,7 +19,8 @@ public final class MdMain {
     static ServerSocket server;
     static String transportMode="dev-stream";
     static String audioSource="off";
-    static String nativeVideoMode="720p";
+    static String nativeVideoMode="720p",nativeVideoFps="auto";
+    static boolean explicitVideoMode,explicitVideoFps;
     static boolean nativeServicesEnabled;
     static String voiceRecognizer;
     static boolean bootNative;
@@ -60,7 +61,8 @@ public final class MdMain {
             if(args[i].equals("--boot-nonce")){bootNonce=args[i+1];continue;}
             if(args[i].equals("--transport")){transportMode=choice(args[i+1],"dev-stream","native-usb");continue;}
             if(args[i].equals("--audio-source")){audioSource=choice(args[i+1],"off","remote-submix","split");continue;}
-            if(args[i].equals("--video-mode")){nativeVideoMode=args[i+1];VideoMode.requested(nativeVideoMode,1280,720,30);continue;}
+            if(args[i].equals("--video-mode")){nativeVideoMode=args[i+1];VideoMode.requested(nativeVideoMode,1280,720,30);explicitVideoMode=true;continue;}
+            if(args[i].equals("--video-fps")){nativeVideoFps=choice(args[i+1],"auto","15","30","60");explicitVideoFps=true;continue;}
             if(args[i].equals("--native-services")){nativeServicesEnabled=choice(args[i+1],"off","on").equals("on");continue;}
             if(args[i].equals("--voice-recognizer")){voiceRecognizer=args[i+1];continue;}
             if(args[i].equals("--log-dir")){logDirectory=args[i+1];continue;}
@@ -224,10 +226,11 @@ public final class MdMain {
         if(id==0x1806b||id==0x1806d||id==0x1806f)throw new IOException("ENCRYPTION_UNSUPPORTED: no authorized encryption provider for message 0x"+Integer.toHexString(id));
     }
     static int androidKeyCodeForCarLife(int key){return NativeSessionProtocol.androidKeyCode(key);}
-    static MediaCodecDisplaySource.Selection selectOutput(int w,int h,int fps,boolean realtime)throws IOException{
+    static MediaCodecDisplaySource.Selection selectOutput(int w,int h,int fps,boolean realtime)throws IOException{return selectOutput(w,h,fps,realtime,nativeVideoMode);}
+    static MediaCodecDisplaySource.Selection selectOutput(int w,int h,int fps,boolean realtime,String mode)throws IOException{
         try{return MediaCodecDisplaySource.select(w,h,fps,realtime);}
         catch(IOException rejected){
-            if(!nativeVideoMode.equals("auto")||(w==1280&&h==720))throw rejected;
+            if(!mode.equals("auto")||(w==1280&&h==720))throw rejected;
             logFields("native_mode_fallback","requested_width",w,"requested_height",h,"reason",rejected.toString(),"accepted_width",1280,"accepted_height",720);
             return MediaCodecDisplaySource.select(1280,720,fps,realtime);
         }
@@ -271,6 +274,9 @@ public final class MdMain {
         final AtomicLong snapshotSequence=new AtomicLong(),videoEnqueuedPackets=new AtomicLong(),videoEnqueuedBytes=new AtomicLong(),controlEnqueuedPackets=new AtomicLong(),controlEnqueuedBytes=new AtomicLong(),staleVideoEnqueueDrops=new AtomicLong(),staleVideoWriteDrops=new AtomicLong();
         MediaCodecDisplaySource.Selection codecSelection;ProjectionGeometry geometry;
         volatile PendingVideoInit pendingInit;
+        NativeVideoConfig videoConfig;
+        volatile String videoSettingsStatus;
+        String videoSettingsReason="";
         Thread writer,captureThread;boolean version=false,paused=false;volatile boolean initialized=false;int width=1280,height=720;long bytes=0,chunks=0,nativeLogicalSession=1;long touchCount=0,touchRecoveries=0,nativeTouchIngressUptime;int touchDiagnosticSamples=0,unknownTouchDiagnosticSamples=0,touchOrdinaryIngress=0,touchPriorityIngress=0,lastTouchShape=-1;
         NativePhoneVerification phoneVerification;
         int huMajor,huMinor,acceptedFps=30;boolean statisticReplied,moduleStatusSent,featureConfigRecorded;long moduleStatusDue;
@@ -370,7 +376,7 @@ public final class MdMain {
         void clearVideoQueues(){videos.clear();nativeVideos.clear();}
         void adaptVideo(long now){
             MediaCodecDisplaySource source=mediaSource;
-            if(source==null||source.generation!=videoGeneration||!nativeCompatibility())return;
+            if(source==null||source.generation!=videoGeneration||!transport.isNativeUsb())return;
             if(nativeVideos.consumeSyncRequest(now))source.requestKeyFrame();
             int bitrate=videoRate.bitrateFor(nativeVideos.snapshot(now),now);
             if(bitrate!=0)source.requestBitrate(bitrate);
@@ -378,7 +384,7 @@ public final class MdMain {
         boolean requestSourceFrameRate(int fps){MediaCodecDisplaySource source=mediaSource;return source!=null&&source.requestFrameRate(fps);}
         int sourceFrameRate(){MediaCodecDisplaySource source=mediaSource;return source==null?0:source.appliedFrameRate();}
         synchronized void requestFrameRateChange(int fps)throws IOException{
-            if(!nativeCompatibility()||!initialized||fps<1||fps>30||!requestSourceFrameRate(fps)){
+            if(!nativeCompatibility()||!initialized||fps<1||fps>60||(codecSelection!=null&&fps>codecSelection.fps)||!requestSourceFrameRate(fps)){
                 logFields("native_fps_change_unavailable","session_id",sessionId,"requested_fps",fps,"source_running",mediaSource!=null,"ack_sent",false);return;
             }
             pendingFps=fps;pendingFpsGeneration=videoGeneration;
@@ -389,11 +395,12 @@ public final class MdMain {
             if(!open||pendingFpsGeneration!=videoGeneration){pendingFps=0;return;}
             if(sourceFrameRate()!=pendingFps)return;
             int applied=pendingFps;pendingFps=0;acceptedFps=applied;
+            updateVideoSettingsStatus();
             send(CMD,0x1000d,Proto.ints(1,applied));
             logFields("native_fps_changed","session_id",sessionId,"generation",videoGeneration,"applied_fps",applied,"ack_after_egl_apply",true);
         }
         void sendAccessUnit(AvcAccessUnits.Au au,long generation)throws IOException{
-            if(!nativeCompatibility()){sendWithTimestamp(VIDEO,0x20001,au.bytes,generation,(int)(au.ptsUs/1000));return;}
+            if(!transport.isNativeUsb()){sendWithTimestamp(VIDEO,0x20001,au.bytes,generation,(int)(au.ptsUs/1000));return;}
             if(!open||generation!=videoGeneration){staleVideoEnqueueDrops.incrementAndGet();return;}
             Packet p=new Packet(packet(VIDEO,0x20001,au.bytes,(int)(au.ptsUs/1000)),generation,au.idr);
             long now=SystemClock.uptimeMillis();
@@ -535,14 +542,14 @@ public final class MdMain {
             long now=SystemClock.uptimeMillis(),writeStarted=writingSince;Packet inFlight=writingPacket;
             PipelineProgress.Queue v=PipelineProgress.queue(videos,now),c=PipelineProgress.queue(controls,now);
             VideoQueue.Snapshot nv=nativeVideos.snapshot(now);
-            if(nativeCompatibility()&&videoSource.equals("mediacodec"))v=new PipelineProgress.Queue(v.items+nv.items,v.wireBytes+nv.bytes,v.items+nv.items==0?null:Math.max(v.oldestAgeMs==null?0:v.oldestAgeMs,nv.oldestAgeMs));
+            if(transport.isNativeUsb()&&videoSource.equals("mediacodec"))v=new PipelineProgress.Queue(v.items+nv.items,v.wireBytes+nv.bytes,v.items+nv.items==0?null:Math.max(v.oldestAgeMs==null?0:v.oldestAgeMs,nv.oldestAgeMs));
             ArrayList<Object> f=new ArrayList<Object>(96);
             Collections.addAll(f,"session_id",sessionId,"active_generation",videoGeneration,"source_generation",source==null?null:source.generation,"reason",reason,"snapshot_sequence",snapshotSequence.incrementAndGet(),"sample_uptime_ms",now,"snapshot_consistency","best_effort_cross_thread; queue bytes include complete wire headers","session_open",open,
                 "video_queue_items",v.items,"video_queue_wire_bytes",v.wireBytes,"video_queue_oldest_age_ms",v.oldestAgeMs,"control_queue_items",c.items,"control_queue_wire_bytes",c.wireBytes,"control_queue_oldest_age_ms",c.oldestAgeMs,
                 "video_enqueued_packets",videoEnqueuedPackets.get(),"video_enqueued_wire_bytes",videoEnqueuedBytes.get(),"control_enqueued_packets",controlEnqueuedPackets.get(),"control_enqueued_wire_bytes",controlEnqueuedBytes.get(),"video_enqueue_last_uptime_ms",PipelineProgress.seen(lastVideoEnqueueUptime),"video_enqueue_age_ms",PipelineProgress.age(now,lastVideoEnqueueUptime),
                 "socket_written_packets",socketWrittenPackets,"socket_written_video_packets",socketWrittenVideoPackets,"socket_written_wire_bytes",socketWrittenBytes,"socket_write_last_uptime_ms",PipelineProgress.seen(lastSocketWriteUptime),"socket_write_progress_age_ms",PipelineProgress.age(now,lastSocketWriteUptime),"socket_write_last_duration_ms",lastSocketWriteDurationMs,
                 "socket_inflight_started_uptime_ms",PipelineProgress.seen(writeStarted),"socket_inflight_age_ms",PipelineProgress.age(now,writeStarted),"socket_inflight_wire_bytes",inFlight==null?0:inFlight.data.length,"socket_inflight_generation",inFlight==null?null:inFlight.videoGeneration,"stale_enqueue_drops",staleVideoEnqueueDrops.get(),"stale_write_drops",staleVideoWriteDrops.get(),
-                "video_queue_capacity",8,"control_queue_capacity",32,"video_queue_age_budget_ms",nativeCompatibility()?VideoQueue.MAX_AGE_MS:2000,"socket_write_stall_budget_ms",3000,
+                "video_queue_capacity",8,"control_queue_capacity",32,"video_queue_age_budget_ms",transport.isNativeUsb()?VideoQueue.MAX_AGE_MS:2000,"socket_write_stall_budget_ms",3000,
                 "native_video_queue_bytes_budget",VideoQueue.MAX_BYTES,"native_video_drops",nv.dropped,"native_video_waiting_idr",nv.awaitingIdr,"native_video_pressure_events",nv.pressureEvents,"native_video_target_bitrate",videoRate.requestedBitrate(),"native_video_measured_drain_bytes_per_second",videoRate.drainBytesPerSecond());
             appendAccessoryProgress(f);
             audio.queue.appendProgress(f);Collections.addAll(f,"audio_source_active",audio.active(),"audio_wire_active",audioWireActive,"audio_source_error",audio.error(),"audio_playback_known",playback.known(),"audio_output_active",playback.outputActive());
@@ -617,6 +624,7 @@ public final class MdMain {
                         logFields("native_session_boundary","session_id",sessionId,"logical_session",nativeLogicalSession,"generation",videoGeneration,"reason","fresh HU_VERSION after source-stopped VIDEO_PAUSE");
                     }
                     int match=transport.isNativeUsb()?NativeSessionProtocol.versionStatus(fields):versionMatchStatus(fields);
+                    videoConfig=null;videoSettingsReason="";videoSettingsStatus="Waiting for video negotiation";
                     huMajor=Proto.number(fields,1,0);huMinor=Proto.number(fields,2,0);nativePauseHeartbeatDue=0;statisticReplied=false;moduleStatusSent=false;moduleStatusDue=0;
                     send(CMD,0x10002,Proto.ints(1,match));version=match==1;if(version)everNegotiated=true;
                     logFields("protocol_version","session_id",sessionId,"major",huMajor,"minor",huMinor,"match_status",match,"profile",nativeCompatibility()?"NATIVE_REFERENCE_COMPAT":"SELF_V1");
@@ -648,11 +656,12 @@ public final class MdMain {
                 if(nativeCompatibility()&&id==0x18043){send(CMD,0x10044,NativeSessionProtocol.subscribeDone(p));log("native_metadata_subscription","responded; navigation/media metadata unavailable, video/input unaffected");return;}
                 if(nativeCompatibility()&&(id==0x18052||id==0x18045||id==0x18046)){log("native_optional_info","received command 0x"+Integer.toHexString(id));return;}
                 if(id==0x18007){if(repeatNativeInit())return;if(nativeCompatibility())Proto.requireInts(fields,1,2);else Proto.requireInts(fields,1,2,3);if(initialized||pendingInit!=null)throw new IOException("duplicate init; reset first");int w=Proto.number(fields,1,0),h=Proto.number(fields,2,0),fps=Proto.number(fields,3,0);
-                    if(nativeCompatibility()){int requested=fps,requestedWidth=w,requestedHeight=h;fps=NativeSessionProtocol.fps(fps);VideoMode selectedMode=requestedOutput(w,h,fps);w=selectedMode.width;h=selectedMode.height;logFields("native_fps_negotiation","requested",requested,"accepted",fps,"policy","HeadSwap automatic 1..30 else30");logFields("native_output_mode","session_id",sessionId,"requested_width",requestedWidth,"requested_height",requestedHeight,"accepted_width",w,"accepted_height",h,"source_width",displayWidth,"source_height",displayHeight,"policy",nativeVideoMode+"; capability and actual SPS validated; source density unchanged");}
+                    int hintWidth=w,hintHeight=h,hintFps=fps;
+                    if(nativeCompatibility()){int requested=fps,requestedWidth=w,requestedHeight=h;fps=explicitVideoFps&&!nativeVideoFps.equals("auto")?Integer.parseInt(nativeVideoFps):NativeSessionProtocol.fps(fps);VideoMode selectedMode=requestedOutput(w,h,fps);w=selectedMode.width;h=selectedMode.height;if(!bootNative){logFields("native_fps_negotiation","requested",requested,"accepted",fps,"policy",explicitVideoFps?"explicit CLI":"HeadSwap automatic 1..30 else30");logFields("native_output_mode","session_id",sessionId,"requested_width",requestedWidth,"requested_height",requestedHeight,"accepted_width",w,"accepted_height",h,"source_width",displayWidth,"source_height",displayHeight,"policy",nativeVideoMode+"; capability and actual SPS validated; source density unchanged");}}
                     if(nativeCompatibility())VideoMode.of(w,h,fps);else if(w<320||w>1920||h<180||h>1080||(w&1)!=0||(h&1)!=0||fps<1||fps>60)throw new IOException("unsupported video dimensions/fps hint");
-                    if(bootNative){pendingInit=new PendingVideoInit(w,h,fps,videoGeneration);logFields("boot_media_init_pending","session_id",sessionId,"generation",videoGeneration,"width",w,"height",h,"fps",fps,"wire_ack_sent",false);return;}
+                    if(bootNative){pendingInit=new PendingVideoInit(w,h,fps,videoGeneration,hintWidth,hintHeight,hintFps);logFields("boot_media_init_pending","session_id",sessionId,"generation",videoGeneration,"width",w,"height",h,"fps",fps,"wire_ack_sent",false);return;}
                     if(videoSource.equals("mediacodec")){codecSelection=selectOutput(w,h,fps,false);w=codecSelection.width;h=codecSelection.height;}
-                    geometry=new ProjectionGeometry(displayWidth,displayHeight,w,h,0);sink.cancel();width=w;height=h;acceptedFps=fps;initialized=true;send(CMD,0x10008,Proto.ints(1,w,2,h,3,fps));afterNativeInit();log("video_initialized",videoSource.equals("mediacodec")?"MediaCodecDisplaySource; mode-specific AVC level; actual PTS/flags/CSD in codec logs":"BootstrapDisplaySource; fps is negotiation hint, not controlled encoder rate; PTS unavailable");return;}
+                    geometry=new ProjectionGeometry(displayWidth,displayHeight,w,h,0);sink.cancel();width=w;height=h;acceptedFps=fps;initialized=true;updateVideoSettingsStatus();send(CMD,0x10008,Proto.ints(1,w,2,h,3,fps));afterNativeInit();log("video_initialized",videoSource.equals("mediacodec")?"MediaCodecDisplaySource; mode-specific AVC level; actual PTS/flags/CSD in codec logs":"BootstrapDisplaySource; fps is negotiation hint, not controlled encoder rate; PTS unavailable");return;}
                 if(id==0x18009){if(!initialized)throw new IOException("init required");nativeStartDue=0;nativePauseHeartbeatDue=0;if(capture!=null||mediaSource!=null){if(nativeCompatibility()&&!paused){log("native_start_repeat","source already running; preserve source lease");return;}throw new IOException("duplicate start or previous source not stopped");}paused=false;startCapture();return;}
                 if(id==0x1800a){sink.cancel();stopCapture();paused=true;nativePauseHeartbeatDue=nativeCompatibility()?SystemClock.uptimeMillis()+2000:0;log("paused","capture stop requested; next START only after owned source stopped");return;}
                 if(id==0x1800b){
@@ -706,14 +715,33 @@ public final class MdMain {
             touchDiagnosticSamples++;
             logFields("native_touch_mapping","session_id",sessionId,"logical_session",nativeLogicalSession,"sample",touchDiagnosticSamples,"limit",32,"message_id",id,"action",raw.action,"action_index",raw.actionIndex,"ids",Arrays.toString(raw.ids),"raw_xs",Arrays.toString(raw.xs),"raw_ys",Arrays.toString(raw.ys),"mapped_xs",mapped==null?null:Arrays.toString(mapped.xs),"mapped_ys",mapped==null?null:Arrays.toString(mapped.ys),"inside_content",mapped!=null,"geometry",g.toString(),"generation",raw.generation,"coordinate_units","raw=accepted video pixels; mapped=source display pixels");
         }
+        synchronized boolean failBootInitIfCurrent(PendingVideoInit ticket){
+            if(!ticket.current(pendingInit,videoGeneration,open))return false;
+            close("video_init_failed");return true;
+        }
+        synchronized NativeVideoConfig cachedVideoConfig(PendingVideoInit ticket){
+            return ticket.current(pendingInit,videoGeneration,open)?videoConfig:null;
+        }
+        synchronized NativeVideoConfig acceptVideoConfig(PendingVideoInit ticket,NativeVideoConfig observed)throws IOException{
+            if(!ticket.current(pendingInit,videoGeneration,open))return null;
+            if(videoConfig==null)videoConfig=observed.override(explicitVideoMode?nativeVideoMode:null,explicitVideoFps?nativeVideoFps:null);
+            return videoConfig;
+        }
+        void updateVideoSettingsStatus(){
+            if(videoConfig!=null)videoSettingsStatus=videoConfig.status(width,height,acceptedFps)+videoSettingsReason;
+        }
         synchronized void completeBootInit(PendingVideoInit ticket,MediaCodecDisplaySource.Selection selection)throws IOException{
             if(!ticket.current(pendingInit,videoGeneration,open)){log("boot_stale_init_discarded","RESET/EOF/new VERSION canceled capability probe");return;}
             if(selection==null)throw new IOException("missing validated MediaCodec selection");
             geometry=selection.geometry;
-            codecSelection=selection;sink.cancel();width=selection.width;height=selection.height;acceptedFps=selection.fps;initialized=true;pendingInit=null;
+            if(videoConfig!=null&&videoConfig.mode.equals("auto")&&(selection.width!=ticket.hintWidth||selection.height!=ticket.hintHeight))
+                videoSettingsReason="; fallback: HU geometry invalid or unavailable on encoder";
+            codecSelection=selection;sink.cancel();width=selection.width;height=selection.height;acceptedFps=selection.fps;initialized=true;pendingInit=null;updateVideoSettingsStatus();
             send(CMD,0x10008,Proto.ints(1,width,2,height,3,acceptedFps));
             afterNativeInit();
-            logFields("video_initialized","session_id",sessionId,"generation",videoGeneration,"boot_native",true,"width",width,"height",height,"fps",ticket.fps,"initialization","display and encoder capabilities validated; source resources begin on VIDEO_START");
+            logFields("native_fps_negotiation","requested",ticket.hintFps,"accepted",acceptedFps,"policy",videoConfig==null?"legacy HU hint":videoConfig.encoded());
+            logFields("native_output_mode","session_id",sessionId,"requested_width",ticket.hintWidth,"requested_height",ticket.hintHeight,"accepted_width",width,"accepted_height",height,"source_width",displayWidth,"source_height",displayHeight,"policy",videoConfig==null?"legacy HU hint":videoConfig.encoded(),"actual_sps_validation","required on source start");
+            logFields("video_initialized","session_id",sessionId,"generation",videoGeneration,"boot_native",true,"width",width,"height",height,"fps",selection.fps,"initialization","display and encoder capabilities validated; source resources begin on VIDEO_START");
         }
         synchronized void startCapture()throws IOException{
             audioNegotiated=true;maybeStartAudio();

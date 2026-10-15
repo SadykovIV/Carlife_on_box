@@ -33,7 +33,16 @@ public final class VideoQueueTest {
         check(!q.offer(f(VideoQueue.MAX_SINGLE_BYTES+1,2,1962,true),2,1962),"single frame bound enforced");
         q.clear();check(q.isEmpty()&&q.snapshot(2000).awaitingIdr&&!q.consumeSyncRequest(2000),"clear restores wait without scheduling spurious sync");
         q.offer(f(100,2,2000,true),2,2000);q.poll(2,2000);
-        check(!q.offer(f(500000,2,2001,false),2,2001)&&q.isEmpty()&&q.snapshot(2001).awaitingIdr,"oversized single P does not inherit the standalone IDR exception");
+        Frame largeP=f(550784+20,2,2001,false);
+        check(q.offer(largeP,2,2001)&&q.snapshot(2001).items==1&&!q.snapshot(2001).awaitingIdr,"one1080 scene-change P fits alone with intact prior chain");
+        check(q.poll(2,2001)==largeP,"large P reaches writer without silently losing reference");
+        check(q.offer(f(100,2,2002,false),2,2002),"dependent P after normally written large P remains admissible");q.poll(2,2002);
+        Frame maximumP=f(VideoQueue.MAX_SINGLE_BYTES,2,2003,false);
+        check(q.offer(maximumP,2,2003),"one complete AU up to2MiB+headers allowed");
+        check(!q.offer(f(100,2,2004,false),2,2004)&&q.snapshot(2004).awaitingIdr,"later dropped P marks dependency loss");
+        check(q.poll(2,2004)==maximumP,"later congestion does not erase already admitted large P");
+        check(!q.offer(f(100,2,2005,false),2,2005),"after a lost P only real IDR can restore dependency chain");
+        q.clear();check(!q.offer(largeP,2,2006),"large P cannot bypass initial/recovery IDR requirement");
         // Continuous production into a stalled writer stays bounded and never waits.
         long started=System.nanoTime();for(int i=0;i<100000;i++){long now=2000+i;q.offer(f(10000,2,now,i%30==0),2,now);VideoQueue.Snapshot s=q.snapshot(now);if(s.bytes>VideoQueue.MAX_SINGLE_BYTES||s.items>8)throw new AssertionError("unbounded queue");}
         check((System.nanoTime()-started)/1000000<5000,"100k blocked-writer offers never wait for transport");

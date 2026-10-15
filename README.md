@@ -33,7 +33,7 @@ A fresh system integration seeds **Baidu CarLife** as the default. A later owner
 | Enforcing SELinux deployment | Not validated; the development firmware was already permissive |
 | Latency | Bounded native AU queue and adaptive bitrate implemented; actual end-to-end improvement remains unmeasured |
 
-The full OTA and proprietary OEM applications are not distributed here. This repository contains source, build tools and tests. Building a JAR successfully does not establish compatibility with a new device or head unit.
+The source repository contains project code, build tools and tests. Optional r7 release assets also include the exact supported OEM application overlay; those third-party binaries are separate from Apache-2.0 source. Full OTA images and signing keys are not distributed. Building a JAR successfully does not establish compatibility with a new device or head unit.
 
 [Current native services/video candidate](docs/NATIVE_CANDIDATE.md) describes implementation, remaining hardware checks and reproducible builds. The [HeadSwap review](docs/HEADSWAP_LESSONS.md) preserves the earlier findings.
 
@@ -42,6 +42,8 @@ Already running a manually integrated native CarLife installation? The [Magisk r
 [Download r6 test release](https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.15-r6): first-install ZIP for compatible TBox Ultra 1 firmware, separate legacy runtime update/rollback ZIPs and SHA256 checksums. Follow the short [installation and rollback guide](docs/INSTALL_RELEASE.md) ([Русский](docs/ru/INSTALL_RELEASE.md)) to choose the correct package.
 
 ## Start here
+
+[Download r7 video settings](https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.15-r7): resolution/FPS selection beside Baidu CarLife, defaulting to the head unit request. Use the [r7 update and rollback guide](docs/INSTALL_VIDEO_SETTINGS.md) for existing supported OEM integrations. The separate r6 first-install family remains available above. [Video settings details](docs/en/VIDEO_SETTINGS.md).
 
 For compatible TBox Ultra 1 firmware, the [Magisk installer](docs/MAGISK_INSTALLER.md) uses one ZIP and saves and patches each box's own boot during installation, without extracting it in advance or replacing the full firmware. Runtime updates and exact rollback are included. Offline checks pass; hardware acceptance on a second box is still pending.
 

@@ -206,5 +206,20 @@
     "fps": 30,
     "level_idc": 31,
     "raw_config_diff": "Only SPS level_idc byte10 versus original outputFormat31; validated existing OEM exception"
+  },
+  "captured_1080p": {
+    "origin": "Actual c2.qti.avc.encoder outputFormat CSD and BUFFER_FLAG_CODEC_CONFIG from 1920x1080/30 experiment; original guard rejected the level overwrite before first video AU",
+    "source_evidence": "research/video-settings-implementation-20261015/experiment-1080-all-logs.txt",
+    "source_sha256": "e993a99f7e9e87a94030315eefb82b7d6100bf57aa5726b16cbd9bed3a1c8b3c",
+    "library_sha256": "e1b2e80012ade83022614c36faf793d8c094a4421a5bb4818b9429ee1b81c1e6",
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "level_idc": 40,
+    "raw_config_diff": "Only SPS level_idc byte10 versus original outputFormat40; PPS byte-identical",
+    "files": {
+      "mode-qcom-captured-1920x1080-l40.csd.hex": "50e6a53061a2ceda5dd508ca6ace73e53857545cdc73e0f762fe6f1cbddff251",
+      "mode-qcom-captured-1920x1080-l40.raw-config.hex": "9f7409895090fe5eed407aaf025f50253269315be43cf1a3f8462892fb418f39"
+    }
   }
 }
