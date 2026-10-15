@@ -86,7 +86,7 @@ final class BootNativeReadiness implements Runnable {
                 PendingVideoInit ticket=s==null?null:s.pendingInit;
                 if(mediaReady&&ticket!=null&&ticket.current(s.pendingInit,s.videoGeneration,s.open)){
                     try {
-                        MediaCodecDisplaySource.Selection selected=ticket.width==1280&&ticket.height==720&&ticket.fps==30?defaultSelection:MediaCodecDisplaySource.select(ticket.width,ticket.height,ticket.fps,true);
+                        MediaCodecDisplaySource.Selection selected=ticket.width==1280&&ticket.height==720&&ticket.fps==30?defaultSelection:MdMain.selectOutput(ticket.width,ticket.height,ticket.fps,true);
                         s.completeBootInit(ticket,selected);
                     }catch(Exception e){MdMain.logFields("boot_media_init_failed","session_id",s.sessionId,"generation",ticket.generation,"error",e.toString(),"init_done_sent",false);s.close();}
                 }

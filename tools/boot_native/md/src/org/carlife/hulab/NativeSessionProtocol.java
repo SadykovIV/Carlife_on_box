@@ -43,8 +43,14 @@ final class NativeSessionProtocol {
         MdMain.Proto.varint(b,(field<<3)|2);MdMain.Proto.varint(b,data.length);b.write(data);
     }
     static byte[] idleModules()throws IOException {
+        return initialModules(false,false);
+    }
+    static byte[] initialModules(boolean navigation,boolean music)throws IOException {
+        return initialModules(navigation,music,false);
+    }
+    static byte[] initialModules(boolean navigation,boolean music,boolean voice)throws IOException {
         int[] ids={1,2,3,4,6,8,9};ByteArrayOutputStream b=new ByteArrayOutputStream();b.write(MdMain.Proto.ints(1,ids.length));
-        for(int id:ids)bytes(b,2,MdMain.Proto.ints(1,id,2,0));return b.toByteArray();
+        for(int id:ids)bytes(b,2,MdMain.Proto.ints(1,id,2,(id==2&&navigation||id==3&&music||id==4&&voice)?1:0));return b.toByteArray();
     }
     static byte[] multitouchFeatureRequest()throws IOException {
         // Apollo HU SDK fddb0be: CarlifeFeatureConfigList(cnt=1, featureConfig=[

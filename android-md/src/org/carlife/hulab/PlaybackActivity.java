@@ -14,16 +14,17 @@ final class PlaybackActivity {
     interface Observer {void update(Snapshot value);void failed(String detail);}
     interface Source {void start(Observer observer)throws Exception;void close();}
     static final class Snapshot {
-        final Set<Integer> output,media;
-        Snapshot(Set<Integer> output,Set<Integer> media){this.output=new HashSet<Integer>(output);this.media=new HashSet<Integer>(media);}
+        final Set<Integer> output,media,speech;
+        Snapshot(Set<Integer> output,Set<Integer> media){this.output=new HashSet<Integer>(output);this.media=new HashSet<Integer>(media);this.speech=new HashSet<Integer>(output);this.speech.removeAll(media);}
     }
     private final Source source;private final Listener listener;
     private boolean started,known,disabled;private long epoch;
-    private volatile boolean outputActive=true;
+    private volatile boolean outputActive=true,mediaActive=true,speechActive;
     private Set<Integer> output=Collections.emptySet(),media=Collections.emptySet();
     PlaybackActivity(Source source,Listener listener){this.source=source;this.listener=listener;}
-    synchronized void start(){
-        if(started||disabled)return;started=true;outputActive=false;final long token=++epoch;
+    synchronized void start(){start(false);}
+    private void start(boolean keepSpeech){
+        if(started||disabled)return;started=true;outputActive=false;mediaActive=false;speechActive=keepSpeech;final long token=++epoch;
         try{source.start(new Observer(){public void update(Snapshot value){accept(token,value);}public void failed(String detail){fail(token,detail);}});}
         catch(Exception e){fail(token,e.toString());}catch(LinkageError e){fail(token,e.toString());}
     }
@@ -31,24 +32,32 @@ final class PlaybackActivity {
         boolean newMedia=false;
         synchronized(this){if(!started||token!=epoch)return;
             if(known)for(Integer id:value.media)if(!media.contains(id)){newMedia=true;break;}
-            known=true;output=value.output;media=value.media;outputActive=!output.isEmpty();
+            known=true;output=value.output;media=value.media;outputActive=!output.isEmpty();mediaActive=!media.isEmpty();speechActive=!value.speech.isEmpty();
         }
         listener.changed(token,newMedia);
     }
     private void fail(long token,String detail){
         final long failedEpoch;
-        synchronized(this){if(!started||token!=epoch)return;disabled=true;known=false;started=false;failedEpoch=++epoch;output=Collections.emptySet();media=Collections.emptySet();outputActive=true;try{source.close();}catch(RuntimeException ignored){}}
+        synchronized(this){if(!started||token!=epoch)return;disabled=true;known=false;started=false;failedEpoch=++epoch;output=Collections.emptySet();media=Collections.emptySet();outputActive=true;mediaActive=true;speechActive=false;try{source.close();}catch(RuntimeException ignored){}}
         listener.degraded(failedEpoch,detail);
     }
     // When this optional platform API is unavailable, basic PCM remains usable.
     boolean outputActive(){return outputActive;}
+    boolean mediaActive(){return mediaActive;}
+    boolean speechActive(){return speechActive;}
     synchronized boolean known(){return known;}
     synchronized boolean current(long token){return started&&token==epoch;}
     synchronized boolean sameEpoch(long token){return token==epoch;}
     // Re-register before HU pause: callbacks already queued for the old player state
     // retain their old epoch, and the new initial snapshot is a baseline, not Play.
-    synchronized void rebase(){if(!started)return;close();start();}
-    synchronized void close(){started=false;known=false;disabled=false;epoch++;output=Collections.emptySet();media=Collections.emptySet();outputActive=true;try{source.close();}catch(RuntimeException ignored){}}
+    synchronized void rebase(){
+        if(!started)return;
+        // HU MUSIC pause changes only the media lane. Preserve the last confirmed
+        // speech state while the new asynchronous baseline is pending; its first
+        // snapshot (or a failure) replaces this state. Old callbacks remain fenced.
+        boolean keepSpeech=speechActive;close();start(keepSpeech);
+    }
+    synchronized void close(){started=false;known=false;disabled=false;epoch++;output=Collections.emptySet();media=Collections.emptySet();outputActive=true;mediaActive=true;speechActive=false;try{source.close();}catch(RuntimeException ignored){}}
 
     /** The existing privileged app_process uses platform playback callbacks, with no APK or policy. */
     static final class AndroidSource implements Source {
@@ -77,8 +86,8 @@ final class PlaybackActivity {
             for(AudioPlaybackConfiguration config:configs){
                 if(!((Boolean)active.invoke(config)).booleanValue())continue;
                 int usage=config.getAudioAttributes().getUsage();
-                boolean music=usage==0||usage==1||usage==14;
-                if(!music&&usage!=12&&usage!=16)continue;
+                boolean music=AudioUsage.isMedia(usage);
+                if(!music&&!AudioUsage.isSpeech(usage))continue;
                 int id=((Integer)playerId.invoke(config)).intValue();
                 if(id<=0)throw new IOException("playback player identity unavailable");
                 output.add(id);if(music)media.add(id);

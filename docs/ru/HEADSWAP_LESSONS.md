@@ -1,5 +1,7 @@
 # Уроки релизов HeadSwap
 
+> Это исторический разбор на 8c73aaa. Несколько пунктов «предстоит» ниже уже реализованы офлайн; см. [native services/video candidate](NATIVE_CANDIDATE.md).
+
 [English — основная версия](../HEADSWAP_LESSONS.md)
 
 Разобраны все 19 пунктов присланного changelog применительно к **нативной проекции Android самого бокса**. Источник — [HeadSwap v1.2.0](https://github.com/YegorkaPomidorka/headswap/releases/tag/v1.2.0), commit [`0f5502a`](https://github.com/YegorkaPomidorka/headswap/tree/0f5502ab76e2f220b68fa1e2c85b66838f01fd81), проверенный 15 октября 2026 года.

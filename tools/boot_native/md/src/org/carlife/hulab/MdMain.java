@@ -19,6 +19,9 @@ public final class MdMain {
     static ServerSocket server;
     static String transportMode="dev-stream";
     static String audioSource="off";
+    static String nativeVideoMode="720p";
+    static boolean nativeServicesEnabled;
+    static String voiceRecognizer;
     static boolean bootNative;
     static String bootStateFile,bootNonce;
     static BootNativeReadiness bootReadiness;
@@ -56,7 +59,10 @@ public final class MdMain {
             if(args[i].equals("--boot-state-file")){bootStateFile=args[i+1];continue;}
             if(args[i].equals("--boot-nonce")){bootNonce=args[i+1];continue;}
             if(args[i].equals("--transport")){transportMode=choice(args[i+1],"dev-stream","native-usb");continue;}
-            if(args[i].equals("--audio-source")){audioSource=choice(args[i+1],"off","remote-submix");continue;}
+            if(args[i].equals("--audio-source")){audioSource=choice(args[i+1],"off","remote-submix","split");continue;}
+            if(args[i].equals("--video-mode")){nativeVideoMode=args[i+1];VideoMode.requested(nativeVideoMode,1280,720,30);continue;}
+            if(args[i].equals("--native-services")){nativeServicesEnabled=choice(args[i+1],"off","on").equals("on");continue;}
+            if(args[i].equals("--voice-recognizer")){voiceRecognizer=args[i+1];continue;}
             if(args[i].equals("--log-dir")){logDirectory=args[i+1];continue;}
             if(args[i].equals("--video-source")){videoSource=args[i+1];if(!videoSource.equals("bootstrap")&&!videoSource.equals("mediacodec"))throw new IllegalArgumentException("video source must be bootstrap or mediacodec");continue;}
             if(args[i].equals("--encoder")){encoderName=args[i+1];if(!encoderName.equals("OMX.qcom.video.encoder.avc")&&!encoderName.equals("c2.qti.avc.encoder")&&!encoderName.equals("c2.android.avc.encoder"))throw new IllegalArgumentException("encoder outside laboratory whitelist");continue;}
@@ -170,7 +176,13 @@ public final class MdMain {
     }
     static String choice(String value,String...allowed){for(String s:allowed)if(s.equals(value))return value;throw new IllegalArgumentException("unsupported explicit laboratory option "+value);}
     static void shutdown(){running=false;if(bootReadiness!=null)bootReadiness.stop();Session s=active;if(s!=null)s.close();try{if(server!=null)server.close();}catch(IOException e){}OwnedDisplay d=ownedDisplay;if(d!=null)d.close();}
-    static final class Packet { final byte[] data;final long queued=SystemClock.uptimeMillis();final long videoGeneration;Packet(byte[] d,long generation){data=d;videoGeneration=generation;} }
+    static final class Packet {
+        final byte[] data;final long queued=SystemClock.uptimeMillis();final long videoGeneration;
+        final boolean recoveryPoint,initialStatus;
+        Packet(byte[] d,long generation){this(d,generation,false);}
+        Packet(byte[] d,long generation,boolean recovery){this(d,generation,recovery,false);}
+        Packet(byte[] d,long generation,boolean recovery,boolean initial){data=d;videoGeneration=generation;recoveryPoint=recovery;initialStatus=initial;}
+    }
     static boolean sameVideoGeneration(long packetGeneration,long currentGeneration){return packetGeneration==currentGeneration;}
     static byte[] packet(int channel,int id,byte[] payload,int timestamp)throws IOException{
         ByteArrayOutputStream b=new ByteArrayOutputStream(payload.length+20);DataOutputStream d=new DataOutputStream(b);
@@ -180,7 +192,12 @@ public final class MdMain {
         else{d.writeInt(payload.length);d.writeInt(timestamp);d.writeInt(id);}
         d.write(payload);return b.toByteArray();
     }
-    static final class Frame { final int channel,id;final byte[] payload;final CarLifeFrameReader.TouchWire touchWire;Frame(int c,int i,byte[] p){this(c,i,p,null);}Frame(int c,int i,byte[] p,CarLifeFrameReader.TouchWire wire){channel=c;id=i;payload=p;touchWire=wire;} }
+    static final class Frame {
+        final int channel,id,timestamp;final byte[] payload;final CarLifeFrameReader.TouchWire touchWire;
+        Frame(int c,int i,byte[] p){this(c,i,p,null,0);}
+        Frame(int c,int i,byte[] p,CarLifeFrameReader.TouchWire wire){this(c,i,p,wire,0);}
+        Frame(int c,int i,byte[] p,CarLifeFrameReader.TouchWire wire,int time){channel=c;id=i;payload=p;touchWire=wire;timestamp=time;}
+    }
     static Frame readFrame(DataInputStream in)throws IOException {
         int first;try{first=in.read();}catch(SocketTimeoutException idle){return null;}
         if(first<0)throw new EOFException("at frame boundary");
@@ -189,10 +206,10 @@ public final class MdMain {
         int length=in.readInt();int header=(channel==CMD||channel==TOUCH)?8:12;
         if(channel<1||channel>6||length<header||length>MAX_BODY)throw new IOException("invalid outer header");
         byte[] body=new byte[length];in.readFully(body);DataInputStream d=new DataInputStream(new ByteArrayInputStream(body));
-        int declared,reserved=0,id;if(header==8){declared=d.readUnsignedShort();reserved=d.readUnsignedShort();id=d.readInt();}else{declared=d.readInt();d.readInt();id=d.readInt();}
+        int declared,reserved=0,id,timestamp=0;if(header==8){declared=d.readUnsignedShort();reserved=d.readUnsignedShort();id=d.readInt();}else{declared=d.readInt();timestamp=d.readInt();id=d.readInt();}
         if(declared<0||length!=header+declared||reserved!=0)throw new IOException("inner length/reserved mismatch");
         if((id>>>16)!=channel)throw new IOException("message ID / channel mismatch");
-        byte[] payload=new byte[declared];d.readFully(payload);return new Frame(channel,id,payload);
+        byte[] payload=new byte[declared];d.readFully(payload);return new Frame(channel,id,payload,null,timestamp);
     }
     static int versionMatchStatus(Map<Integer,Object> fields)throws IOException {
         Proto.requireInts(fields,1,2);
@@ -207,19 +224,46 @@ public final class MdMain {
         if(id==0x1806b||id==0x1806d||id==0x1806f)throw new IOException("ENCRYPTION_UNSUPPORTED: no authorized encryption provider for message 0x"+Integer.toHexString(id));
     }
     static int androidKeyCodeForCarLife(int key){return NativeSessionProtocol.androidKeyCode(key);}
-    static final class Session {
+    static MediaCodecDisplaySource.Selection selectOutput(int w,int h,int fps,boolean realtime)throws IOException{
+        try{return MediaCodecDisplaySource.select(w,h,fps,realtime);}
+        catch(IOException rejected){
+            if(!nativeVideoMode.equals("auto")||(w==1280&&h==720))throw rejected;
+            logFields("native_mode_fallback","requested_width",w,"requested_height",h,"reason",rejected.toString(),"accepted_width",1280,"accepted_height",720);
+            return MediaCodecDisplaySource.select(1280,720,fps,realtime);
+        }
+    }
+    static VideoMode requestedOutput(int w,int h,int fps)throws IOException{
+        try{return VideoMode.requested(nativeVideoMode,w,h,fps);}
+        catch(IOException invalid){if(!nativeVideoMode.equals("auto"))throw invalid;logFields("native_mode_hint_invalid","width",w,"height",h,"reason",invalid.toString(),"fallback","720p");return VideoMode.of(1280,720,fps);}
+    }
+    static class Session {
         final long sessionId=++sessionSequence;
         final MdTransport transport; final DataInputStream in;final OutputStream out;
         final ArrayBlockingQueue<Packet> controls=new ArrayBlockingQueue<Packet>(32),videos=new ArrayBlockingQueue<Packet>(8);
+        // Encoded native AUs use byte/age limits and decoder-chain recovery.
+        // The existing queue remains for SELF/bootstrap and empty PAUSE keepalives.
+        final VideoQueue<Packet> nativeVideos=new VideoQueue<Packet>(new VideoQueue.Adapter<Packet>(){
+            public int bytes(Packet p){return p.data.length;}
+            public long generation(Packet p){return p.videoGeneration;}
+            public long queuedAt(Packet p){return p.queued;}
+            public boolean recoveryPoint(Packet p){return p.recoveryPoint;}
+            public boolean heartbeat(Packet p){return p.data.length==20;}
+        });
+        volatile VideoRateControl videoRate=new VideoRateControl();
         final Object writerSignal=new Object();
-        final PcmAudioSession audio;
+        final PcmAudioSession audio,speech;
+        final AudioPolicySources audioPolicy;
+        final boolean splitAudio;
         final PlaybackActivity playback;
-        final boolean audioRequested=audioSource.equals("remote-submix");
-        boolean audioNegotiated,audioAttempted;
+        final boolean audioRequested=!audioSource.equals("off");
+        boolean audioNegotiated,audioAttempted,speechAttempted,preferSpeech;
         volatile boolean audioHuMuted,audioBluetooth;
         volatile boolean audioWireActive;
+        volatile boolean speechWireActive,naviWireActive,routeNavigationActive;
+        volatile NativeServices services;
         static final class MusicStatus {final long epoch;final boolean active;MusicStatus(long e,boolean a){epoch=e;active=a;}}
         volatile MusicStatus pendingMusicStatus;
+        volatile MusicStatus pendingNaviStatus;
         volatile boolean open=true,everNegotiated,closeComplete;volatile String terminalReason;volatile long writingSince;volatile long videoGeneration=0;volatile Process capture;
         volatile MediaCodecDisplaySource mediaSource;
         volatile Packet writingPacket;
@@ -230,26 +274,45 @@ public final class MdMain {
         Thread writer,captureThread;boolean version=false,paused=false;volatile boolean initialized=false;int width=1280,height=720;long bytes=0,chunks=0,nativeLogicalSession=1;long touchCount=0,touchRecoveries=0,nativeTouchIngressUptime;int touchDiagnosticSamples=0,unknownTouchDiagnosticSamples=0,touchOrdinaryIngress=0,touchPriorityIngress=0,lastTouchShape=-1;
         NativePhoneVerification phoneVerification;
         int huMajor,huMinor,acceptedFps=30;boolean statisticReplied,moduleStatusSent,featureConfigRecorded;long moduleStatusDue;
+        int pendingFps;long pendingFpsGeneration=-1;
         volatile long nativeStartDue;
         long nativePauseHeartbeatDue;
         final InputSink sink;
         Session(Socket s)throws IOException{this(new SocketMdTransport(s));}
         Session(MdTransport t)throws IOException{this(t,new InputSink());}
-        Session(MdTransport t,InputSink input)throws IOException{this(t,input,new PcmAudioSession.Factory(){public PcmAudioSession.Source create(){return new RemoteSubmixSource();}});}
+        static final class AudioInputs {
+            final PcmAudioSession.Factory media,speech;final SourceLease mediaLease,speechLease;final AudioPolicySources policy;
+            AudioInputs(PcmAudioSession.Factory media){this(media,null,PcmAudioSession.LEASE,null,null);}
+            AudioInputs(PcmAudioSession.Factory media,PcmAudioSession.Factory speech,SourceLease ml,SourceLease sl,AudioPolicySources p){this.media=media;this.speech=speech;mediaLease=ml;speechLease=sl;policy=p;}
+            static AudioInputs production(){
+                if(audioSource.equals("split")){AudioPolicySources p=new AudioPolicySources();return new AudioInputs(p.factory(CarLifeAudio.Lane.MEDIA),p.factory(CarLifeAudio.Lane.TTS),p.lease(CarLifeAudio.Lane.MEDIA),p.lease(CarLifeAudio.Lane.TTS),p);}
+                return new AudioInputs(new PcmAudioSession.Factory(){public PcmAudioSession.Source create(){return new RemoteSubmixSource();}});
+            }
+        }
+        Session(MdTransport t,InputSink input)throws IOException{this(t,input,AudioInputs.production(),new PlaybackActivity.AndroidSource());}
         Session(MdTransport t,InputSink input,PcmAudioSession.Factory audioFactory)throws IOException{
             this(t,input,audioFactory,new PlaybackActivity.AndroidSource());
         }
         Session(MdTransport t,InputSink input,PcmAudioSession.Factory audioFactory,PlaybackActivity.Source playbackSource)throws IOException{
+            this(t,input,new AudioInputs(audioFactory),playbackSource);
+        }
+        Session(MdTransport t,InputSink input,AudioInputs sources,PlaybackActivity.Source playbackSource)throws IOException{
             transport=t;in=new DataInputStream(t.input());out=t.output();sink=input;sink.configureNativeTouch(t.isNativeUsb());
+            audioPolicy=sources.policy;splitAudio=sources.speech!=null;
             playback=new PlaybackActivity(playbackSource,new PlaybackActivity.Listener(){
                 public void changed(long epoch,boolean newMediaStart){playbackChanged(epoch,newMediaStart);}
                 public void degraded(long epoch,String detail){if(!open||!playback.sameEpoch(epoch))return;logFields("audio_playback_monitor","session_id",sessionId,"state","degraded","detail",detail,"fallback","basic PCM; resume by explicit MEDIA_PLAY hardkey");maybeStartAudio();musicStatusReply();}
             });
-            audio=new PcmAudioSession(audioFactory,new PcmAudioSession.Events(){
+            audio=new PcmAudioSession(sources.media,new PcmAudioSession.Events(){
                 public long now(){return SystemClock.uptimeMillis();}
                 public void wakeWriter(){wake();}
                 public void state(String state,String detail){logFields("audio_source","session_id",sessionId,"state",state,"detail",detail,"source",audioSource);}
-            });
+            },CarLifeAudio.Lane.MEDIA,sources.mediaLease);
+            speech=!splitAudio?null:new PcmAudioSession(sources.speech,new PcmAudioSession.Events(){
+                public long now(){return SystemClock.uptimeMillis();}
+                public void wakeWriter(){wake();}
+                public void state(String state,String detail){logFields("speech_source","session_id",sessionId,"state",state,"detail",detail,"source","split");}
+            },CarLifeAudio.Lane.TTS,sources.speechLease);
         }
         String wireMarker(){return transport.isNativeUsb()?(videoSource.equals("mediacodec")?"DIRECT_USB_AOA;source=MediaCodecDisplaySource;video=ANNEXB_AU;timestamp=ENCODER_PTS_MS":"DIRECT_USB_AOA"):(videoSource.equals("mediacodec")?MediaCodecDisplaySource.WIRE_MARKER:"DEV_STREAM_OVER_ADB");}
         void run()throws IOException {
@@ -262,18 +325,23 @@ public final class MdMain {
             while(open&&running){
                 nativeProgress();
                 Frame f;
-                try{if(nativeReader==null)f=readFrame(in);else{CarLifeFrameReader.Frame n=nativeReader.readNext();f=n==null?null:new Frame(n.channel,n.id,n.payload,n.touchWire);}}catch(EOFException e){noteTerminal("peer_eof");logFields("peer_eof","session_id",sessionId,"logical_session",nativeLogicalSession,"ever_negotiated",everNegotiated,"detail","disconnect or truncated frame: "+e.getMessage());break;}
+                try{if(nativeReader==null)f=readFrame(in);else{CarLifeFrameReader.Frame n=nativeReader.readNext();f=n==null?null:new Frame(n.channel,n.id,n.payload,n.touchWire,n.timestamp);}}catch(EOFException e){noteTerminal("peer_eof");logFields("peer_eof","session_id",sessionId,"logical_session",nativeLogicalSession,"ever_negotiated",everNegotiated,"detail","disconnect or truncated frame: "+e.getMessage());break;}
                 if(f==null)continue;
                 log("rx","channel="+f.channel+" id=0x"+Integer.toHexString(f.id)+" bytes="+f.payload.length);
-                dispatch(f.channel,f.id,f.payload,f.touchWire);
+                dispatch(f.channel,f.id,f.payload,f.touchWire,f.timestamp);
             }
         }
         boolean nativeCompatibility(){return transport.isNativeUsb()&&huMajor>=2;}
+        void closeServices(){NativeServices old;synchronized(audio.queue){old=services;services=null;routeNavigationActive=false;}if(old!=null)old.close();}
+        void updateRouteStatus(){NativeServices s=services;boolean active=s!=null&&s.routeNaviWanted();synchronized(audio.queue){if(s!=services||routeNavigationActive==active)return;routeNavigationActive=active;pendingNaviStatus=new MusicStatus(audio.queue.epoch(),speechWireActive||active);}wake();}
         void nativeProgress()throws IOException {
             maybeStartAudio();
+            updateRouteStatus();
             if(!nativeCompatibility()||!version||!open)return;
             long now=SystemClock.uptimeMillis();
-            if(!moduleStatusSent&&moduleStatusDue>0&&now>=moduleStatusDue){send(CMD,0x10026,NativeSessionProtocol.idleModules());if(audioWireActive)musicStatusReply();moduleStatusSent=true;}
+            adaptVideo(now);
+            completeFrameRateChange();
+            if(!moduleStatusSent&&moduleStatusDue>0&&now>=moduleStatusDue){sendWithTimestamp(CMD,0x10026,currentModules(),-1,0,true);moduleStatusSent=true;}
             // Some v2 HUs omit START (HeadSwap's observed VW flow). Read-loop ownership
             // plus the generation/RESET cancellation prevents a second concurrent source.
             maybeSendNativePauseHeartbeat(now);
@@ -299,19 +367,59 @@ public final class MdMain {
             return false;
         }
         void wake(){synchronized(writerSignal){writerSignal.notifyAll();}}
+        void clearVideoQueues(){videos.clear();nativeVideos.clear();}
+        void adaptVideo(long now){
+            MediaCodecDisplaySource source=mediaSource;
+            if(source==null||source.generation!=videoGeneration||!nativeCompatibility())return;
+            if(nativeVideos.consumeSyncRequest(now))source.requestKeyFrame();
+            int bitrate=videoRate.bitrateFor(nativeVideos.snapshot(now),now);
+            if(bitrate!=0)source.requestBitrate(bitrate);
+        }
+        boolean requestSourceFrameRate(int fps){MediaCodecDisplaySource source=mediaSource;return source!=null&&source.requestFrameRate(fps);}
+        int sourceFrameRate(){MediaCodecDisplaySource source=mediaSource;return source==null?0:source.appliedFrameRate();}
+        synchronized void requestFrameRateChange(int fps)throws IOException{
+            if(!nativeCompatibility()||!initialized||fps<1||fps>30||!requestSourceFrameRate(fps)){
+                logFields("native_fps_change_unavailable","session_id",sessionId,"requested_fps",fps,"source_running",mediaSource!=null,"ack_sent",false);return;
+            }
+            pendingFps=fps;pendingFpsGeneration=videoGeneration;
+            completeFrameRateChange();
+        }
+        synchronized void completeFrameRateChange()throws IOException{
+            if(pendingFps==0)return;
+            if(!open||pendingFpsGeneration!=videoGeneration){pendingFps=0;return;}
+            if(sourceFrameRate()!=pendingFps)return;
+            int applied=pendingFps;pendingFps=0;acceptedFps=applied;
+            send(CMD,0x1000d,Proto.ints(1,applied));
+            logFields("native_fps_changed","session_id",sessionId,"generation",videoGeneration,"applied_fps",applied,"ack_after_egl_apply",true);
+        }
+        void sendAccessUnit(AvcAccessUnits.Au au,long generation)throws IOException{
+            if(!nativeCompatibility()){sendWithTimestamp(VIDEO,0x20001,au.bytes,generation,(int)(au.ptsUs/1000));return;}
+            if(!open||generation!=videoGeneration){staleVideoEnqueueDrops.incrementAndGet();return;}
+            Packet p=new Packet(packet(VIDEO,0x20001,au.bytes,(int)(au.ptsUs/1000)),generation,au.idr);
+            long now=SystemClock.uptimeMillis();
+            if(nativeVideos.offer(p,videoGeneration,now)){
+                lastVideoEnqueueUptime=now;videoEnqueuedPackets.incrementAndGet();videoEnqueuedBytes.addAndGet(p.data.length);wake();
+            }
+            adaptVideo(now);
+        }
         synchronized void maybeStartAudio(){
             if(!open||!version||!audioRequested||!audioNegotiated)return;
             playback.start();
+            if(speech!=null){
+                if(!playback.speechActive()){if(speechAttempted||speech.active()){speech.stop();speechAttempted=false;}}
+                else if(!speechAttempted&&speech.retired())speechAttempted=speech.start();
+            }
             // Wait for the first snapshot; a known idle player must not seize
             // the HU media source with INIT/silent PCM. An unavailable optional
             // observer explicitly reports outputActive=true for basic fallback.
-            if(!playback.outputActive()){
+            if(!mediaPlaybackActive()){
                 if(audioAttempted||audio.active()){audio.stop();audioAttempted=false;}
                 return;
             }
             if(audioHuMuted||audioBluetooth||audioAttempted||!audio.retired())return;
             audioAttempted=audio.start();
         }
+        boolean mediaPlaybackActive(){return splitAudio?playback.mediaActive():playback.outputActive();}
         synchronized void playbackChanged(long epoch,boolean newMediaStart){
             if(!open||!playback.current(epoch))return;
             if(audioHuMuted&&newMediaStart){audioHuMuted=false;audioAttempted=false;log("audio_player_resume","new Android media player start after HU mute; PCM level is not a resume signal");}
@@ -326,21 +434,46 @@ public final class MdMain {
         synchronized void muteAudio(){pauseAudio(true);}
         private void pauseAudio(boolean injectPause){
             boolean first=!audioHuMuted;audioHuMuted=true;audio.stop();
-            if(first){playback.rebase();if(injectPause&&audioRequested&&audioNegotiated)sink.mediaPause();}
+            if(first){playback.rebase();if(injectPause&&audioRequested&&audioNegotiated){NativeServices s=services;if(s==null||!s.onHardkey(0x20))sink.mediaPause();}}
             musicStatusReply();
         }
-        synchronized void resetAudio(){playback.close();audio.stop();synchronized(audio.queue){audio.queue.clear();audioWireActive=false;pendingMusicStatus=null;}audioNegotiated=false;audioAttempted=false;audioHuMuted=false;audioBluetooth=false;}
-        void musicStatusReply(){synchronized(audio.queue){pendingMusicStatus=new MusicStatus(audio.queue.epoch(),audioWireActive&&!audioHuMuted&&!audioBluetooth&&playback.outputActive());}wake();}
+        synchronized void resetAudio(){
+            playback.close();audio.stop();if(speech!=null){speech.stop();speech.queue.clear();}
+            synchronized(audio.queue){audio.queue.clear();audioWireActive=false;pendingMusicStatus=null;pendingNaviStatus=null;}
+            audioNegotiated=false;audioAttempted=false;speechAttempted=false;audioHuMuted=false;audioBluetooth=false;speechWireActive=false;naviWireActive=false;routeNavigationActive=false;
+        }
+        void musicStatusReply(){synchronized(audio.queue){pendingMusicStatus=new MusicStatus(audio.queue.epoch(),audioWireActive&&!audioHuMuted&&!audioBluetooth&&mediaPlaybackActive());}wake();}
+        void naviStatusReply(){synchronized(audio.queue){pendingNaviStatus=new MusicStatus(audio.queue.epoch(),speechWireActive||routeNavigationActive);}wake();}
+        PcmAudioSession audioOwner(CarLifeAudio.Item item){return item.channel==CarLifeAudio.Lane.TTS.channel?speech:audio;}
+        CarLifeAudio.Item pollAudio(long now){
+            CarLifeAudio.Item item=null;
+            if(preferSpeech&&speech!=null)item=speech.queue.poll(now);
+            if(item==null)item=audio.queue.poll(now);
+            if(item==null&&speech!=null)item=speech.queue.poll(now);
+            if(item!=null)preferSpeech=item.channel!=CarLifeAudio.Lane.TTS.channel;
+            return item;
+        }
+        boolean audioQueuesEmpty(){return audio.queue.size()==0&&(speech==null||speech.queue.size()==0);}
+        static byte[] moduleStatus(int module,boolean active)throws IOException{
+            return NativeSessionProtocol.join(Proto.ints(1,1),nestedModule(module,active));
+        }
+        static byte[] nestedModule(int module,boolean active)throws IOException{ByteArrayOutputStream b=new ByteArrayOutputStream();NativeSessionProtocol.bytes(b,2,Proto.ints(1,module,2,active?1:0));return b.toByteArray();}
         void audioWritten(CarLifeAudio.Item sound){
+            if(sound.channel==CarLifeAudio.Lane.TTS.channel){
+                synchronized(audio.queue){synchronized(speech.queue){if(!speech.queue.current(sound))return;speech.queue.wrote();if(sound.id!=CarLifeAudio.Lane.TTS.initId&&sound.id!=CarLifeAudio.Lane.TTS.stopId)return;speechWireActive=sound.id==CarLifeAudio.Lane.TTS.initId;
+                    pendingNaviStatus=new MusicStatus(audio.queue.epoch(),speechWireActive||routeNavigationActive);}}
+                wake();logFields("speech_wire_state","session_id",sessionId,"active",speechWireActive,"message_id",sound.id);return;
+            }
             synchronized(audio.queue){if(!audio.queue.current(sound))return;
                 audio.queue.wrote();if(sound.id!=CarLifeAudio.INIT&&sound.id!=CarLifeAudio.STOP)return;
                 audioWireActive=sound.id==CarLifeAudio.INIT;
-                pendingMusicStatus=new MusicStatus(sound.epoch,audioWireActive&&!audioHuMuted&&!audioBluetooth&&playback.outputActive());
+                pendingMusicStatus=new MusicStatus(sound.epoch,audioWireActive&&!audioHuMuted&&!audioBluetooth&&mediaPlaybackActive());
             }
             logFields("audio_wire_state","session_id",sessionId,"active",sound.id==CarLifeAudio.INIT,"message_id",sound.id,"pcm_format","48000/stereo/s16le");
         }
         void audioModuleControl(Map<Integer,Object> fields)throws IOException{
             Proto.requireInts(fields,1,2);int module=Proto.number(fields,1,-1),status=Proto.number(fields,2,-1);
+            if(module==2&&(status==0||status==1)){naviStatusReply();return;}
             if(module!=3||!(status==0||status==1)){log("audio_module_control","unsupported module/status "+module+"/"+status);return;}
             if(status==0)muteAudio(); // status=1 asks for actual state, not autoplay.
             musicStatusReply();
@@ -355,40 +488,65 @@ public final class MdMain {
                 logFields("audio_transport_selected","session_id",sessionId,"mode",audioBluetooth?"bluetooth_no_usb_pcm":"usb_pcm","source_enabled",audioRequested);
             }catch(IOException e){logFields("audio_feature_error","session_id",sessionId,"error",e.toString());}
         }
-        void writeLoop(){boolean preferAudio=true;try{while(open){
+        byte[] currentModules()throws IOException{NativeServices s=services;return NativeSessionProtocol.initialModules(speechWireActive||routeNavigationActive,audioWireActive&&!audioHuMuted&&!audioBluetooth&&mediaPlaybackActive(),s!=null&&s.voiceActive());}
+        void writeLoop(){boolean preferAudio=true;CarLifeAudio.Item deferredSpeech=null;try{while(open){
+            updateRouteStatus();NativeServices serviceOwner=null;
             Packet p=controls.poll();boolean video=false;CarLifeAudio.Item sound=null;
-            MusicStatus music=null;
+            MusicStatus music=null,navi=null;
+            if(p!=null&&p.initialStatus){synchronized(audio.queue){p=new Packet(packet(CMD,0x10026,currentModules(),0),-1);navi=new MusicStatus(audio.queue.epoch(),speechWireActive||routeNavigationActive);}}
             if(p==null){synchronized(audio.queue){music=pendingMusicStatus;pendingMusicStatus=null;}
                 if(music!=null){if(music.epoch!=audio.queue.epoch())continue;p=new Packet(packet(CMD,0x10026,CarLifeAudio.musicStatus(music.active),0),-1);}}
+            if(p==null){synchronized(audio.queue){navi=pendingNaviStatus;pendingNaviStatus=null;}
+                if(navi!=null){if(navi.epoch!=audio.queue.epoch())continue;p=new Packet(packet(CMD,0x10026,moduleStatus(2,navi.active),0),-1);}}
+            if(p==null){serviceOwner=services;NativeServices.Output update=serviceOwner==null?null:serviceOwner.poll();if(update!=null)p=new Packet(packet(CMD,update.id,update.payload,0),-1);else serviceOwner=null;}
             if(p==null){
-                if(preferAudio)sound=audio.queue.poll(SystemClock.uptimeMillis());
-                if(sound==null){p=videos.poll();video=p!=null;}
-                if(p==null&&sound==null)sound=audio.queue.poll(SystemClock.uptimeMillis());
-                if(sound!=null){if(!audio.queue.current(sound))continue;p=new Packet(packet(CarLifeAudio.MEDIA,sound.id,sound.payload,sound.timestamp),-1);preferAudio=false;}
+                if(deferredSpeech!=null){sound=deferredSpeech;deferredSpeech=null;}
+                else if(preferAudio)sound=pollAudio(SystemClock.uptimeMillis());
+                if(sound==null){p=videos.poll();if(p==null)p=nativeVideos.poll(videoGeneration,SystemClock.uptimeMillis());video=p!=null;adaptVideo(SystemClock.uptimeMillis());}
+                if(p==null&&sound==null)sound=pollAudio(SystemClock.uptimeMillis());
+                if(sound!=null){
+                    if(!audioOwner(sound).queue.current(sound))continue;
+                    if(sound.channel==4&&sound.id==CarLifeAudio.Lane.TTS.initId&&!naviWireActive){
+                        // NAVI activation is on the same writer before TTS INIT,
+                        // even if the source callback races the queue wakeup.
+                        deferredSpeech=sound;sound=null;navi=new MusicStatus(audio.queue.epoch(),true);
+                        p=new Packet(packet(CMD,0x10026,moduleStatus(2,true),0),-1);
+                    }else p=new Packet(packet(sound.channel,sound.id,sound.payload,sound.timestamp),-1);
+                    preferAudio=false;
+                }
                 else if(video)preferAudio=true;
             }
-            if(p==null){synchronized(writerSignal){if(open&&controls.isEmpty()&&videos.isEmpty()&&audio.queue.size()==0&&pendingMusicStatus==null)writerSignal.wait(50);}continue;}
-            if(sound!=null&&!audio.queue.current(sound))continue;
+            if(p==null){synchronized(writerSignal){if(open&&controls.isEmpty()&&videos.isEmpty()&&nativeVideos.isEmpty()&&audioQueuesEmpty()&&pendingMusicStatus==null&&pendingNaviStatus==null)writerSignal.wait(50);}continue;}
+            if(sound!=null&&!audioOwner(sound).queue.current(sound))continue;
             if(music!=null&&music.epoch!=audio.queue.epoch())continue;
+            if(navi!=null&&navi.epoch!=audio.queue.epoch())continue;
+            if(serviceOwner!=null&&serviceOwner!=services)continue;
             if(video&&!sameVideoGeneration(p.videoGeneration,videoGeneration)){staleVideoWriteDrops.incrementAndGet();log("video_epoch_drop","discard stale source generation before write");continue;}
             if(video&&SystemClock.uptimeMillis()-p.queued>2000)throw new IOException("video queue latency >2s; reconnect for IDR");
-            writingPacket=p;writingSince=SystemClock.uptimeMillis();transport.writePacket(p.data);
+            writingPacket=p;writingSince=SystemClock.uptimeMillis();VideoRateControl rateAtWrite=videoRate;long writeStartedNs=System.nanoTime();transport.writePacket(p.data);
+            rateAtWrite.onWrite(video?Math.max(0,p.data.length-20):0,Math.max(0,System.nanoTime()-writeStartedNs),SystemClock.uptimeMillis());
             long ended=SystemClock.uptimeMillis();lastSocketWriteDurationMs=ended-writingSince;lastSocketWriteUptime=ended;socketWrittenPackets++;socketWrittenBytes+=p.data.length;if(video)socketWrittenVideoPackets++;writingSince=0;writingPacket=null;
             if(sound!=null)audioWritten(sound);
+            if(navi!=null&&navi.epoch==audio.queue.epoch())naviWireActive=navi.active;
+            adaptVideo(ended);
         }}catch(Exception e){if(open)logFields("write_error","session_id",sessionId,"logical_session",nativeLogicalSession,"ever_negotiated",everNegotiated,"error",e.toString());close("write_error");}}
         void maybeReportProgress(){long now=SystemClock.uptimeMillis();if(now-lastSnapshotUptime>=PipelineProgress.PERIOD_MS){lastSnapshotUptime=now;reportProgress("periodic",mediaSource);}}
         void reportProgress(String reason,MediaCodecDisplaySource source){
             long now=SystemClock.uptimeMillis(),writeStarted=writingSince;Packet inFlight=writingPacket;
             PipelineProgress.Queue v=PipelineProgress.queue(videos,now),c=PipelineProgress.queue(controls,now);
+            VideoQueue.Snapshot nv=nativeVideos.snapshot(now);
+            if(nativeCompatibility()&&videoSource.equals("mediacodec"))v=new PipelineProgress.Queue(v.items+nv.items,v.wireBytes+nv.bytes,v.items+nv.items==0?null:Math.max(v.oldestAgeMs==null?0:v.oldestAgeMs,nv.oldestAgeMs));
             ArrayList<Object> f=new ArrayList<Object>(96);
             Collections.addAll(f,"session_id",sessionId,"active_generation",videoGeneration,"source_generation",source==null?null:source.generation,"reason",reason,"snapshot_sequence",snapshotSequence.incrementAndGet(),"sample_uptime_ms",now,"snapshot_consistency","best_effort_cross_thread; queue bytes include complete wire headers","session_open",open,
                 "video_queue_items",v.items,"video_queue_wire_bytes",v.wireBytes,"video_queue_oldest_age_ms",v.oldestAgeMs,"control_queue_items",c.items,"control_queue_wire_bytes",c.wireBytes,"control_queue_oldest_age_ms",c.oldestAgeMs,
                 "video_enqueued_packets",videoEnqueuedPackets.get(),"video_enqueued_wire_bytes",videoEnqueuedBytes.get(),"control_enqueued_packets",controlEnqueuedPackets.get(),"control_enqueued_wire_bytes",controlEnqueuedBytes.get(),"video_enqueue_last_uptime_ms",PipelineProgress.seen(lastVideoEnqueueUptime),"video_enqueue_age_ms",PipelineProgress.age(now,lastVideoEnqueueUptime),
                 "socket_written_packets",socketWrittenPackets,"socket_written_video_packets",socketWrittenVideoPackets,"socket_written_wire_bytes",socketWrittenBytes,"socket_write_last_uptime_ms",PipelineProgress.seen(lastSocketWriteUptime),"socket_write_progress_age_ms",PipelineProgress.age(now,lastSocketWriteUptime),"socket_write_last_duration_ms",lastSocketWriteDurationMs,
                 "socket_inflight_started_uptime_ms",PipelineProgress.seen(writeStarted),"socket_inflight_age_ms",PipelineProgress.age(now,writeStarted),"socket_inflight_wire_bytes",inFlight==null?0:inFlight.data.length,"socket_inflight_generation",inFlight==null?null:inFlight.videoGeneration,"stale_enqueue_drops",staleVideoEnqueueDrops.get(),"stale_write_drops",staleVideoWriteDrops.get(),
-                "video_queue_capacity",8,"control_queue_capacity",32,"video_queue_age_budget_ms",2000,"socket_write_stall_budget_ms",3000);
+                "video_queue_capacity",8,"control_queue_capacity",32,"video_queue_age_budget_ms",nativeCompatibility()?VideoQueue.MAX_AGE_MS:2000,"socket_write_stall_budget_ms",3000,
+                "native_video_queue_bytes_budget",VideoQueue.MAX_BYTES,"native_video_drops",nv.dropped,"native_video_waiting_idr",nv.awaitingIdr,"native_video_pressure_events",nv.pressureEvents,"native_video_target_bitrate",videoRate.requestedBitrate(),"native_video_measured_drain_bytes_per_second",videoRate.drainBytesPerSecond());
             appendAccessoryProgress(f);
             audio.queue.appendProgress(f);Collections.addAll(f,"audio_source_active",audio.active(),"audio_wire_active",audioWireActive,"audio_source_error",audio.error(),"audio_playback_known",playback.known(),"audio_output_active",playback.outputActive());
+            if(speech!=null){speech.queue.appendProgress(f,"speech");Collections.addAll(f,"speech_source_active",speech.active(),"speech_wire_active",speechWireActive,"speech_source_error",speech.error(),"speech_playback_active",playback.speechActive(),"audio_policy",audioPolicy==null?"injected":audioPolicy.diagnostics());}
             if(source!=null)source.appendProgress(f,now);
             logFields("md_progress",f.toArray(new Object[0]));
         }
@@ -409,9 +567,10 @@ public final class MdMain {
         }
         void send(int ch,int id,byte[] data)throws IOException{send(ch,id,data,-1);}
         void send(int ch,int id,byte[] data,long generation)throws IOException{sendWithTimestamp(ch,id,data,generation,(int)SystemClock.uptimeMillis());}
-        void sendWithTimestamp(int ch,int id,byte[] data,long generation,int timestamp)throws IOException{try{
+        void sendWithTimestamp(int ch,int id,byte[] data,long generation,int timestamp)throws IOException{sendWithTimestamp(ch,id,data,generation,timestamp,false);}
+        void sendWithTimestamp(int ch,int id,byte[] data,long generation,int timestamp,boolean initialStatus)throws IOException{try{
             if(ch==VIDEO&&!sameVideoGeneration(generation,videoGeneration)){staleVideoEnqueueDrops.incrementAndGet();log("video_epoch_drop","discard stale source generation before enqueue");return;}
-            Packet p=new Packet(packet(ch,id,data,timestamp),generation);
+            Packet p=new Packet(packet(ch,id,data,timestamp),generation,false,initialStatus);
             if(!(ch==VIDEO?videos:controls).offer(p,1000,TimeUnit.MILLISECONDS))throw new IOException("bounded send queue exhausted");
             wake();
             long enqueuedAt=SystemClock.uptimeMillis();
@@ -420,6 +579,10 @@ public final class MdMain {
         }catch(InterruptedException e){Thread.currentThread().interrupt();throw new IOException(e);}}
         void dispatch(int ch,int id,byte[] p)throws IOException {dispatch(ch,id,p,null);}
         void dispatch(int ch,int id,byte[] p,CarLifeFrameReader.TouchWire wire)throws IOException {
+            dispatch(ch,id,p,wire,0);
+        }
+        void dispatch(int ch,int id,byte[] p,CarLifeFrameReader.TouchWire wire,int timestamp)throws IOException {
+            if(ch==5&&id==0x58001){NativeServices s=services;if(version&&s!=null)s.onMic(p,timestamp);return;}
             // A malformed/unsupported touch or Android injection refusal is local to input.
             // Framing, command negotiation and media/transport failures remain terminal.
             if(ch==TOUCH&&transport.isNativeUsb()){
@@ -449,7 +612,7 @@ public final class MdMain {
                         // Closing a host libusb claim is not a physical device detach. A fresh
                         // genuine HU_VERSION after PAUSE starts negotiation on the same fd.
                         // One writer preserves old in-flight VIDEO -> VERSION_MATCH ordering.
-                        stopCapture();resetAudio();sink.cancel();controls.clear();videos.clear();
+                        stopCapture();closeServices();resetAudio();sink.cancel();controls.clear();clearVideoQueues();
                         version=false;initialized=false;paused=false;codecSelection=null;geometry=null;nativeLogicalSession++;
                         logFields("native_session_boundary","session_id",sessionId,"logical_session",nativeLogicalSession,"generation",videoGeneration,"reason","fresh HU_VERSION after source-stopped VIDEO_PAUSE");
                     }
@@ -462,10 +625,17 @@ public final class MdMain {
                         byte[] mdInfo=NativeSessionProtocol.deviceInfo(wireMarker());
                         send(CMD,0x1001b,NativeSessionProtocol.EMPTY);send(CMD,0x10018,NativeSessionProtocol.EMPTY);send(CMD,0x10004,mdInfo);
                         phoneVerification=new NativePhoneVerification(mdInfo);moduleStatusDue=SystemClock.uptimeMillis()+500;
+                        if(nativeServicesEnabled){services=new NativeServices(voiceRecognizer);services.start();}
                     }
                     if(!version)log("version_rejected","invalid version or unsupported development profile");return;
                 }
                 if(!version)throw new IOException("version required");
+                NativeServices nativeServices=services;
+                if(nativeServices!=null){
+                    if(id==0x18003)nativeServices.onHuInfo(p);
+                    try{if(nativeServices.onCommand(id,p))return;}
+                    catch(IOException|RuntimeException e){logFields("native_service_command_error","message_id",id,"error",e.toString());if(id==0x18043||id==0x18045||id==0x18046)return;}
+                }
                 if(id==0x18028){audioModuleControl(fields);return;}
                 if(id==0x1800e){muteAudio();log("audio_pause_media","HU paused USB PCM; Android MEDIA_PAUSE requested");return;}
                 if(id==0x18052){audioFeatureConfig(p);log("native_optional_info","feature config received");return;}
@@ -478,17 +648,17 @@ public final class MdMain {
                 if(nativeCompatibility()&&id==0x18043){send(CMD,0x10044,NativeSessionProtocol.subscribeDone(p));log("native_metadata_subscription","responded; navigation/media metadata unavailable, video/input unaffected");return;}
                 if(nativeCompatibility()&&(id==0x18052||id==0x18045||id==0x18046)){log("native_optional_info","received command 0x"+Integer.toHexString(id));return;}
                 if(id==0x18007){if(repeatNativeInit())return;if(nativeCompatibility())Proto.requireInts(fields,1,2);else Proto.requireInts(fields,1,2,3);if(initialized||pendingInit!=null)throw new IOException("duplicate init; reset first");int w=Proto.number(fields,1,0),h=Proto.number(fields,2,0),fps=Proto.number(fields,3,0);
-                    if(nativeCompatibility()){int requested=fps,requestedWidth=w,requestedHeight=h;fps=NativeSessionProtocol.fps(fps);w=NativeSessionProtocol.VIDEO_WIDTH;h=NativeSessionProtocol.VIDEO_HEIGHT;logFields("native_fps_negotiation","requested",requested,"accepted",fps,"policy","HeadSwap automatic 1..30 else30");logFields("native_output_mode","session_id",sessionId,"requested_width",requestedWidth,"requested_height",requestedHeight,"accepted_width",w,"accepted_height",h,"source_width",displayWidth,"source_height",displayHeight,"policy","selected R720 output like HeadSwap; source geometry/density unchanged");}
-                    if(w<320||w>1920||h<180||h>1080||(w&1)!=0||(h&1)!=0||fps<1||fps>60)throw new IOException("unsupported video dimensions/fps hint");
+                    if(nativeCompatibility()){int requested=fps,requestedWidth=w,requestedHeight=h;fps=NativeSessionProtocol.fps(fps);VideoMode selectedMode=requestedOutput(w,h,fps);w=selectedMode.width;h=selectedMode.height;logFields("native_fps_negotiation","requested",requested,"accepted",fps,"policy","HeadSwap automatic 1..30 else30");logFields("native_output_mode","session_id",sessionId,"requested_width",requestedWidth,"requested_height",requestedHeight,"accepted_width",w,"accepted_height",h,"source_width",displayWidth,"source_height",displayHeight,"policy",nativeVideoMode+"; capability and actual SPS validated; source density unchanged");}
+                    if(nativeCompatibility())VideoMode.of(w,h,fps);else if(w<320||w>1920||h<180||h>1080||(w&1)!=0||(h&1)!=0||fps<1||fps>60)throw new IOException("unsupported video dimensions/fps hint");
                     if(bootNative){pendingInit=new PendingVideoInit(w,h,fps,videoGeneration);logFields("boot_media_init_pending","session_id",sessionId,"generation",videoGeneration,"width",w,"height",h,"fps",fps,"wire_ack_sent",false);return;}
-                    if(videoSource.equals("mediacodec"))codecSelection=MediaCodecDisplaySource.select(w,h,fps);
-                    geometry=new ProjectionGeometry(displayWidth,displayHeight,w,h,0);sink.cancel();width=w;height=h;acceptedFps=fps;initialized=true;send(CMD,0x10008,Proto.ints(1,w,2,h,3,fps));afterNativeInit();log("video_initialized",videoSource.equals("mediacodec")?"MediaCodecDisplaySource; requested AVC Baseline31; actual PTS/flags/CSD in codec logs":"BootstrapDisplaySource; fps is negotiation hint, not controlled encoder rate; PTS unavailable");return;}
+                    if(videoSource.equals("mediacodec")){codecSelection=selectOutput(w,h,fps,false);w=codecSelection.width;h=codecSelection.height;}
+                    geometry=new ProjectionGeometry(displayWidth,displayHeight,w,h,0);sink.cancel();width=w;height=h;acceptedFps=fps;initialized=true;send(CMD,0x10008,Proto.ints(1,w,2,h,3,fps));afterNativeInit();log("video_initialized",videoSource.equals("mediacodec")?"MediaCodecDisplaySource; mode-specific AVC level; actual PTS/flags/CSD in codec logs":"BootstrapDisplaySource; fps is negotiation hint, not controlled encoder rate; PTS unavailable");return;}
                 if(id==0x18009){if(!initialized)throw new IOException("init required");nativeStartDue=0;nativePauseHeartbeatDue=0;if(capture!=null||mediaSource!=null){if(nativeCompatibility()&&!paused){log("native_start_repeat","source already running; preserve source lease");return;}throw new IOException("duplicate start or previous source not stopped");}paused=false;startCapture();return;}
                 if(id==0x1800a){sink.cancel();stopCapture();paused=true;nativePauseHeartbeatDue=nativeCompatibility()?SystemClock.uptimeMillis()+2000:0;log("paused","capture stop requested; next START only after owned source stopped");return;}
                 if(id==0x1800b){
                     if(nativeCompatibility()&&initialized){MediaCodecDisplaySource source=mediaSource;boolean requested=source!=null&&source.requestKeyFrame();logFields("native_keyframe_reset","session_id",sessionId,"generation",videoGeneration,"requested",requested,"source_preserved",true);return;}
                     stopCapture();initialized=false;paused=false;nativePauseHeartbeatDue=0;sink.cancel();log("reset","video state reset; input canceled");return;}
-                if(id==0x1800c){log("unsupported","runtime frame rate change unsupported by selected laboratory source; no success ACK");return;}
+                if(id==0x1800c){Proto.requireInts(fields,1);requestFrameRateChange(Proto.number(fields,1,0));return;}
                 log("unsupported","command0x"+Integer.toHexString(id)+" no fabricated success ACK");return;
             }
             if(ch==TOUCH){dispatchTouch(id,p,fields);return;}
@@ -504,7 +674,7 @@ public final class MdMain {
             if(!version||!initialized)throw new IOException("touch requires initialized session");
             if(!transport.isNativeUsb()&&touchCount>200000)throw new IOException("input count limit");
             if(id==0x68001||id==0x6800e||(transport.isNativeUsb()&&TouchFrame.isLegacyStream(id))){sink.wire(id,p,fields,geometry,videoGeneration,this);return;}
-            if(id==0x68008){Proto.requireInts(fields,1);int key=Proto.number(fields,1,-1);if(androidKeyCodeForCarLife(key)>=0){sink.hardkey(key);if(key==0x1f)explicitMediaPlay();else if(key==0x20)explicitMediaPause();}else log("unsupported","hardkey="+key);return;}
+            if(id==0x68008){Proto.requireInts(fields,1);int key=Proto.number(fields,1,-1);NativeServices s=services;boolean handled=s!=null&&s.onHardkey(key);if(!handled&&androidKeyCodeForCarLife(key)>=0){sink.hardkey(key);handled=true;}if(handled){if(key==0x1f)explicitMediaPlay();else if(key==0x20)explicitMediaPause();}else log("unsupported","hardkey="+key);return;}
             if(transport.isNativeUsb()){if(unknownTouchDiagnosticSamples<8){unknownTouchDiagnosticSamples++;logFields("native_touch_unknown","session_id",sessionId,"sample",unknownTouchDiagnosticSamples,"limit",8,"message_id",id,"payload_length",p.length);}}else log("unsupported","touchid0x"+Integer.toHexString(id));
         }
         static String touchHex(byte[] p){return hexPrefix(p,64);}
@@ -539,36 +709,36 @@ public final class MdMain {
         synchronized void completeBootInit(PendingVideoInit ticket,MediaCodecDisplaySource.Selection selection)throws IOException{
             if(!ticket.current(pendingInit,videoGeneration,open)){log("boot_stale_init_discarded","RESET/EOF/new VERSION canceled capability probe");return;}
             if(selection==null)throw new IOException("missing validated MediaCodec selection");
-            geometry=new ProjectionGeometry(displayWidth,displayHeight,ticket.width,ticket.height,0);
-            codecSelection=selection;sink.cancel();width=ticket.width;height=ticket.height;acceptedFps=ticket.fps;initialized=true;pendingInit=null;
-            send(CMD,0x10008,Proto.ints(1,ticket.width,2,ticket.height,3,ticket.fps));
+            geometry=selection.geometry;
+            codecSelection=selection;sink.cancel();width=selection.width;height=selection.height;acceptedFps=selection.fps;initialized=true;pendingInit=null;
+            send(CMD,0x10008,Proto.ints(1,width,2,height,3,acceptedFps));
             afterNativeInit();
             logFields("video_initialized","session_id",sessionId,"generation",videoGeneration,"boot_native",true,"width",width,"height",height,"fps",ticket.fps,"initialization","display and encoder capabilities validated; source resources begin on VIDEO_START");
         }
         synchronized void startCapture()throws IOException{
             audioNegotiated=true;maybeStartAudio();
-            final long generation=++videoGeneration;
-            if(videoSource.equals("mediacodec")){if(codecSelection==null)throw new IOException("MediaCodec plan missing");MediaCodecDisplaySource source=new MediaCodecDisplaySource(this,codecSelection,generation);CAPTURE_LEASE.acquire(source,"mediacodec session="+sessionId+" generation="+generation);mediaSource=source;try{source.start();}catch(RuntimeException e){mediaSource=null;CAPTURE_LEASE.release(source,true);throw new IOException("source thread did not start",e);}return;}
+            final long generation=++videoGeneration;videoRate=new VideoRateControl(nativeVideos.snapshot(SystemClock.uptimeMillis()).pressureEvents);pendingFps=0;
+            if(videoSource.equals("mediacodec")){if(codecSelection==null)throw new IOException("MediaCodec plan missing");MediaCodecDisplaySource source=new MediaCodecDisplaySource(this,codecSelection,generation);CAPTURE_LEASE.acquire(source,"mediacodec session="+sessionId+" generation="+generation);mediaSource=source;if(acceptedFps!=codecSelection.fps)source.requestFrameRate(acceptedFps);try{source.start();}catch(RuntimeException e){mediaSource=null;CAPTURE_LEASE.release(source,true);throw new IOException("source thread did not start",e);}return;}
             final Object leaseOwner=new Object();CAPTURE_LEASE.acquire(leaseOwner,"bootstrap session="+sessionId+" generation="+generation);
             final Process child;try{child=new ProcessBuilder("/system/bin/screenrecord","--output-format=h264","--size",width+"x"+height,"--bit-rate","4000000","--time-limit","60","-").start();}catch(IOException e){CAPTURE_LEASE.release(leaseOwner,true);throw e;}capture=child;
             log("capture_start","/system/bin/screenrecord; Android display -> H264 -> MD packets; 60s max; no output file");
             Thread stderr=new Thread(new Runnable(){public void run(){try{BufferedReader r=new BufferedReader(new InputStreamReader(child.getErrorStream()));String l;int n=0;while((l=r.readLine())!=null&&n++<64)log("screenrecord_stderr",l.substring(0,Math.min(512,l.length())));}catch(IOException e){}}},"capture-stderr");stderr.setDaemon(true);stderr.start();
             captureThread=new Thread(new Runnable(){public void run(){try{byte[] b=new byte[65536];int n;while(open&&capture==child&&(n=child.getInputStream().read(b))!=-1){if(n==0)continue;send(VIDEO,0x20001,Arrays.copyOf(b,n),generation);bytes+=n;chunks++;}log(open&&capture==child?"capture_eof":"capture_stopped","bytes="+bytes+" chunks="+chunks+" NOTframeCount");}catch(IOException e){log(open&&capture==child?"capture_error":"capture_stopped",e.toString());}finally{boolean stopped=terminateChild(child);CAPTURE_LEASE.release(leaseOwner,stopped);logFields("capture_lease_released","source","bootstrap","session_id",sessionId,"cleanup_confirmed",stopped,"lease_state",CAPTURE_LEASE.state());synchronized(Session.this){if(capture==child)capture=null;}}}},"capture-reader");captureThread.start();
         }
-        void stopCapture(){Process p;Thread t;MediaCodecDisplaySource m;synchronized(this){videoGeneration++;pendingInit=null;nativeStartDue=0;p=capture;capture=null;t=captureThread;captureThread=null;m=mediaSource;}reportProgress("generation_invalidated",m);if(m!=null){m.requestStop();boolean done=m.awaitStopped(3000);if(done){synchronized(this){if(mediaSource==m)mediaSource=null;}}else logFields("codec_stop_timeout","session_id",sessionId,"generation",videoGeneration,"new_start_blocked",true);}if(p!=null){p.destroy();try{p.getInputStream().close();p.getErrorStream().close();}catch(IOException e){}try{if(!p.waitFor(2000,TimeUnit.MILLISECONDS))p.destroyForcibly();}catch(InterruptedException e){Thread.currentThread().interrupt();}}if(t!=null&&t!=Thread.currentThread())try{t.join(2500);}catch(InterruptedException e){Thread.currentThread().interrupt();}videos.clear();}
+        void stopCapture(){Process p;Thread t;MediaCodecDisplaySource m;synchronized(this){videoGeneration++;pendingInit=null;nativeStartDue=0;p=capture;capture=null;t=captureThread;captureThread=null;m=mediaSource;}reportProgress("generation_invalidated",m);if(m!=null){m.requestStop();boolean done=m.awaitStopped(3000);if(done){synchronized(this){if(mediaSource==m)mediaSource=null;}}else logFields("codec_stop_timeout","session_id",sessionId,"generation",videoGeneration,"new_start_blocked",true);}if(p!=null){p.destroy();try{p.getInputStream().close();p.getErrorStream().close();}catch(IOException e){}try{if(!p.waitFor(2000,TimeUnit.MILLISECONDS))p.destroyForcibly();}catch(InterruptedException e){Thread.currentThread().interrupt();}}if(t!=null&&t!=Thread.currentThread())try{t.join(2500);}catch(InterruptedException e){Thread.currentThread().interrupt();}clearVideoQueues();}
         synchronized void mediaSourceEnded(MediaCodecDisplaySource source){if(mediaSource==source)mediaSource=null;}
         synchronized void noteTerminal(String reason){if(terminalReason==null)terminalReason=reason;}
         boolean awaitTerminalCleanup(long timeoutMs){
             long end=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(timeoutMs);
             while(true){
                 Thread w=writer;
-                if(closeComplete&&(w==null||!w.isAlive())&&capture==null&&captureThread==null&&mediaSource==null&&!CAPTURE_LEASE.isHeld()&&audio.retired())return true;
+                if(closeComplete&&(w==null||!w.isAlive())&&capture==null&&captureThread==null&&mediaSource==null&&!CAPTURE_LEASE.isHeld()&&audio.retired()&&(speech==null||speech.retired())&&(audioPolicy==null||audioPolicy.retired()))return true;
                 if(System.nanoTime()>=end)return false;
                 try{Thread.sleep(10);}catch(InterruptedException e){Thread.currentThread().interrupt();return false;}
             }
         }
         void close(){close("session_close");}
-        void close(String reason){synchronized(this){if(!open)return;noteTerminal(reason);open=false;}playback.close();audio.stop();audio.queue.clear();wake();try{try{transport.close();}catch(IOException e){log("transport_close_error",e.toString());}stopCapture();sink.cancel();controls.clear();videos.clear();if(writer!=null&&writer!=Thread.currentThread())writer.interrupt();reportProgress("session_closed",mediaSource);logFields("session_closed","session_id",sessionId,"logical_session",nativeLogicalSession,"ever_negotiated",everNegotiated,"terminal_reason",terminalReason,"bytes",bytes,"chunks",chunks,"touches",touchCount);}finally{closeComplete=true;}}
+        void close(String reason){synchronized(this){if(!open)return;noteTerminal(reason);open=false;}closeServices();playback.close();audio.stop();audio.queue.clear();if(speech!=null){speech.stop();speech.queue.clear();}wake();try{try{transport.close();}catch(IOException e){log("transport_close_error",e.toString());}stopCapture();sink.cancel();controls.clear();clearVideoQueues();if(writer!=null&&writer!=Thread.currentThread())writer.interrupt();reportProgress("session_closed",mediaSource);logFields("session_closed","session_id",sessionId,"logical_session",nativeLogicalSession,"ever_negotiated",everNegotiated,"terminal_reason",terminalReason,"bytes",bytes,"chunks",chunks,"touches",touchCount);}finally{closeComplete=true;}}
     }
     static boolean terminateChild(Process child){
         child.destroy();try{if(child.waitFor(2000,TimeUnit.MILLISECONDS))return true;child.destroyForcibly();return child.waitFor(2000,TimeUnit.MILLISECONDS);}catch(InterruptedException e){Thread.currentThread().interrupt();return !child.isAlive();}

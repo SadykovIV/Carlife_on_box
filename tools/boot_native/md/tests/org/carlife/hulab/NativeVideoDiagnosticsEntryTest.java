@@ -12,10 +12,10 @@ public final class NativeVideoDiagnosticsEntryTest {
     public static void main(String[] args)throws Exception{
         check(MediaCodecDisplaySource.fullVideoTraceDefault,"shared default remains full");
         entry(true,null);check(!MediaCodecDisplaySource.fullVideoTraceDefault,"native boot default selects light");
-        MediaCodecDisplaySource light=new MediaCodecDisplaySource(null,null,1);
+        MediaCodecDisplaySource light=new MediaCodecDisplaySource(null,new MediaCodecDisplaySource.Selection("fixture","repeat","max-fps",1280,720,30),1);
         entry(true,"full");check(MediaCodecDisplaySource.fullVideoTraceDefault,"explicit full overrides native default");
         check(!light.fullVideoTrace,"existing source keeps its immutable diagnostic mode");
-        MediaCodecDisplaySource full=new MediaCodecDisplaySource(null,null,2);
+        MediaCodecDisplaySource full=new MediaCodecDisplaySource(null,new MediaCodecDisplaySource.Selection("fixture","repeat","max-fps",1280,720,30),2);
         entry(true,"auto");check(!MediaCodecDisplaySource.fullVideoTraceDefault,"auto returns boot default light");
         check(full.fullVideoTrace,"later policy cannot change old full source");
         entry(false,null);check(MediaCodecDisplaySource.fullVideoTraceDefault,"non-boot native entry preserves prior full behavior");

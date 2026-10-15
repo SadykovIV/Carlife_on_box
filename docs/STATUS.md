@@ -1,5 +1,7 @@
 # Validation record
 
+Current candidate: 43 JVM suites, 97 host HU tests and 12 runtime-option tests PASS. DEX/runtime built; device unavailable, no installation. Split audio, metadata, Yandex notifications, HU microphone and video queue/FPS/modes are implemented offline. [Current details](NATIVE_CANDIDATE.md). The records below describe earlier revisions.
+
 [Русский](ru/STATUS.md) · [Home](../README.md)
 
 Snapshot: 14 October 2026. This is a summarized engineering record. Raw device captures and personal identifiers are kept out of the public repository.

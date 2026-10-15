@@ -14,21 +14,24 @@ final class AvcAccessUnits {
     private byte[] sps, pps;
     private byte[] formatSps,formatPps;
     private final boolean originalFormatGuard;
+    private final VideoMode expectedMode;
     private int guardedConfigs;
     private ByteArrayOutputStream partial;
     private long partialPts;
     private int partialFlags;
     private boolean sawIdr;
 
-    AvcAccessUnits(){this(false);}
-    AvcAccessUnits(boolean guard){originalFormatGuard=guard;}
+    AvcAccessUnits(){this(false,null);}
+    AvcAccessUnits(boolean guard){this(guard,null);}
+    AvcAccessUnits(boolean guard,VideoMode mode){originalFormatGuard=guard;expectedMode=mode;}
     int guardedConfigs(){return guardedConfigs;}
     void addFormatCsd(byte[] raw)throws IOException{
         for(byte[] nal:split(normalize(raw))){int type=nal[0]&31;if(type==7)formatSps=nal;if(type==8)formatPps=nal;}
         if(originalFormatGuard){sps=formatSps;pps=formatPps;if(sps!=null&&pps!=null)validateParameterIds();}else addCsd(raw);
     }
     void validateParameterIds()throws IOException{
-        if(sps.length<5||(sps[1]&255)!=66||(sps[3]&255)!=31)throw new IOException("original outputFormat CSD is not Baseline/Level31");
+        if(expectedMode!=null)expectedMode.validateSps(sps);
+        else if(sps.length<5||(sps[1]&255)!=66||(sps[3]&255)!=31)throw new IOException("original outputFormat CSD is not Baseline/Level31");
         Bits a=new Bits(sps);a.skip(24);int sid=a.ue();Bits b=new Bits(pps);int pid=b.ue(),psid=b.ue();if(sid>31||pid>255||sid!=psid)throw new IOException("outputFormat PPS/SPS ID mismatch");
     }
     void guardedConfig(byte[] raw)throws IOException{
@@ -61,6 +64,7 @@ final class AvcAccessUnits {
             if (type==7) sps=nal;
             if (type==8) pps=nal;
         }
+        if(expectedMode!=null&&sps!=null&&pps!=null)validateParameterIds();
     }
 
     Au accept(byte[] raw, long ptsUs, int flags) throws IOException {
@@ -88,6 +92,7 @@ final class AvcAccessUnits {
             if(originalFormatGuard&&(type==1||type==5)){if(pps==null)throw new IOException("slice before outputFormat PPS");Bits bits=new Bits(nal);bits.ue();bits.ue();int slicePid=bits.ue();int pid=new Bits(pps).ue();if(slicePid!=pid)throw new IOException("slice references another PPS/generation");}
         }
         if (!vcl) return null;
+        if(expectedMode!=null&&sps!=null&&pps!=null)validateParameterIds();
         if (!sawIdr&&!idr) throw new IOException("first VCL AU is not IDR");
         if (idr) {
             if(sps==null||pps==null) throw new IOException("IDR has no original codec SPS/PPS");

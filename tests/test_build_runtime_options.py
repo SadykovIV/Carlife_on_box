@@ -53,6 +53,31 @@ class RuntimeBuildOptionsTests(unittest.TestCase):
         # Off is a no-op even for a future controller layout; no unrelated build restriction.
         self.assertEqual(build.configure_controller_audio('future launch layout\r\n', 'off'), 'future launch layout\r\n')
 
+    def test_split_services_auto_candidate_changes_launch_and_version_only(self):
+        control, controller = build.configure_runtime_inputs(self.control, self.controller, 'split',
+            'native-services-1', self.version, 'on', 'auto')
+        self.assertIn('--native-services on --video-mode auto --audio-source split', controller)
+        launch = next(line for line in controller.splitlines() if 'exec /system/bin/app_process' in line)
+        self.assertEqual(launch.count('--native-services'), 1)
+        self.assertEqual(launch.count('--audio-source'), 1)
+        self.assertIn('exact_lf "$P/current" native-services-1 || exit 70', control)
+        self.assertIn("case \"$1\" in *' org.carlife.hulab.MdMain '*'--transport native-usb'*)", controller)
+        self.assertEqual(subprocess.run(['sh', '-n'], input=controller, text=True, capture_output=True).returncode, 0)
+
+    def test_video_mode_is_validated_before_shell_staging(self):
+        for value in ('720p', 'auto', '1280x480', '1920x1080', '2240x976'):
+            self.assertEqual(build.video_mode(value), value)
+        for value in (';id', 'auto$(id)', '1920x1080\n', '1281x720', '2560x1440', '0x0', '320x9999'):
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                build.video_mode(value)
+
+    def test_services_options_cannot_be_duplicated(self):
+        once = build.configure_controller_services(self.controller, 'on', 'auto')
+        with self.assertRaises(ValueError):
+            build.configure_controller_services(once, 'on', 'auto')
+        with self.assertRaises(ValueError):
+            build.configure_controller_services(self.controller, 'maybe', 'auto')
+
     def test_audio_changes_only_the_actual_launch_not_identity_matcher(self):
         configured = build.configure_controller_audio(self.controller, 'remote-submix')
         before, after = self.controller.splitlines(), configured.splitlines()

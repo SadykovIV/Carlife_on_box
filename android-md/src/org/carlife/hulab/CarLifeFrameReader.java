@@ -24,10 +24,11 @@ public final class CarLifeFrameReader {
     public interface Clock { long millis(); }
     public interface Diagnostics { void accept(Header h); }
     public static final class Frame {
-        public final int channel,id;
+        public final int channel,id,timestamp;
         public final byte[] payload;
         public final TouchWire touchWire;
-        Frame(int channel,int id,byte[] payload,TouchWire touchWire){this.channel=channel;this.id=id;this.payload=payload;this.touchWire=touchWire;}
+        Frame(int channel,int id,byte[] payload,TouchWire touchWire){this(channel,id,payload,touchWire,0);}
+        Frame(int channel,int id,byte[] payload,TouchWire touchWire,int timestamp){this.channel=channel;this.id=id;this.payload=payload;this.touchWire=touchWire;this.timestamp=timestamp;}
     }
     /** Native TOUCH evidence only; preserves the full opaque inner header and the
      * available body before reference min(declared, available) delivery semantics.
@@ -167,7 +168,7 @@ public final class CarLifeFrameReader {
         // Match reference parseCmd/parseData semantics, never invent payload bytes.
         int copied=Math.min(n,available),id=u32(body,offset+(h==8?4:8));
         if(ready.size()>=MAX_BYTES/8)throw new IOException("CarLife complete inner queue exceeds bounded outer capacity");
-        ready.addLast(new Frame(c,id,Arrays.copyOfRange(body,offset+h,offset+h+copied),c==6?new TouchWire(body,offset,size,n,copied):null));
+        ready.addLast(new Frame(c,id,Arrays.copyOfRange(body,offset+h,offset+h+copied),c==6?new TouchWire(body,offset,size,n,copied):null,h==12?u32(body,offset+4):0));
     }
     private void validateHeader(int c,byte[] b,int o)throws IOException {
         if(!headerValid(c,b,o)){

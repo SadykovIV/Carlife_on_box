@@ -30,7 +30,7 @@ def replace_unique(text, old, new, label):
 
 def configure_controller_audio(text, audio_source):
     """Change only the staged MD launch line; the identity matcher is left untouched."""
-    if audio_source not in ('off', 'remote-submix'):
+    if audio_source not in ('off', 'remote-submix', 'split'):
         raise ValueError('unsupported audio source')
     if audio_source == 'off':
         return text
@@ -43,14 +43,42 @@ def configure_controller_audio(text, audio_source):
     if lines[i].count(launch) != 1 or '--audio-source' in lines[i]:
         raise ValueError('MD launch line has duplicate command or an existing audio option')
     lines[i] = replace_unique(lines[i], '--transport native-usb',
-                              '--transport native-usb --audio-source remote-submix', 'native transport launch option')
+                              '--transport native-usb --audio-source '+audio_source, 'native transport launch option')
     return ''.join(lines)
 
-def configure_runtime_inputs(control, controller, audio_source, version, source_version):
+def video_mode(value):
+    if value in ('720p', 'auto'):
+        return value
+    if re.fullmatch(r'[0-9]{3,4}x[0-9]{3,4}', value):
+        w, h = map(int, value.split('x'))
+        if 320 <= w <= 2560 and 180 <= h <= 1440 and not (w % 2 or h % 2) and ((w+15)//16)*((h+15)//16) <= 8704:
+            return value
+    raise argparse.ArgumentTypeError('video mode must be 720p, auto, or an even AVC level <=4.2 WIDTHxHEIGHT')
+
+def configure_controller_services(text, services, mode):
+    if services not in ('off', 'on'):
+        raise ValueError('unsupported native services mode')
+    mode = video_mode(mode)
+    extra = (' --native-services on' if services == 'on' else '') + (' --video-mode '+mode if mode != '720p' else '')
+    if not extra:
+        return text
+    launch = 'exec /system/bin/app_process /system/bin org.carlife.hulab.MdMain'
+    lines = text.splitlines(keepends=True)
+    candidates = [i for i, line in enumerate(lines) if launch in line]
+    if len(candidates) != 1:
+        raise ValueError('MD launch line must occur exactly once in staged controller')
+    i = candidates[0]
+    if '--native-services' in lines[i] or '--video-mode' in lines[i]:
+        raise ValueError('MD launch line already specifies native services/video mode')
+    lines[i] = replace_unique(lines[i], '--transport native-usb', '--transport native-usb'+extra, 'native transport launch option')
+    return ''.join(lines)
+
+def configure_runtime_inputs(control, controller, audio_source, version, source_version, native_services='off', mode='720p'):
     """Prepare version-consistent staging files without changing source/baseline files."""
     version = runtime_version(version)
     source_version = runtime_version(source_version)
     controller = configure_controller_audio(controller, audio_source)
+    controller = configure_controller_services(controller, native_services, mode)
     if version != source_version:
         control = replace_unique(control, 'V=$P/versions/' + source_version + '\n',
                                  'V=$P/versions/' + version + '\n', 'resolver version path')
@@ -69,8 +97,10 @@ def argument_parser(default_version):
     p.add_argument('--clang', default='clang')
     p.add_argument('--ld-lld', default='ld.lld')
     p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--audio-source', choices=('off', 'remote-submix'), default='off',
+    p.add_argument('--audio-source', choices=('off', 'remote-submix', 'split'), default='off',
                    help='MD audio source for this staged runtime; off preserves the baseline launch line')
+    p.add_argument('--native-services', choices=('off', 'on'), default='off', help='Media metadata, Yandex notification navigation, HU microphone/recognizer')
+    p.add_argument('--video-mode', type=video_mode, default='720p', help='720p baseline, auto HU hint with capability fallback, or explicit WIDTHxHEIGHT')
     p.add_argument('--runtime-version', type=runtime_version, default=default_version,
                    help='Separate runtime version directory (default: %(default)s); never installs/selects it')
     return p
@@ -88,7 +118,7 @@ def main():
         control, controller = configure_runtime_inputs(
             (ROOT/'tools/boot_native/runtime/runtime-control.sh').read_bytes().decode('utf-8'),
             (ROOT/'tools/boot_native/runtime/runtime-controller.sh').read_bytes().decode('utf-8'),
-            a.audio_source, a.runtime_version, mod.VERSION)
+            a.audio_source, a.runtime_version, mod.VERSION, a.native_services, a.video_mode)
     except ValueError as error:
         p.error(str(error))
     java = str(a.java_home/'bin/java') if a.java_home else shutil.which('java')
@@ -151,6 +181,7 @@ exec /system/bin/app_process /system/bin org.carlife.selector.SelectorDaemon @HE
     (release/'manifest.json').write_text(json.dumps({'payload':payload, 'oem_apks_included':False},indent=2)+'\n')
     result = {'status':'SOURCE_BUILD_ONLY_NOT_DEVICE_TESTED','runtime_sha256':runtime['archive_sha256'],
               'audio_source':a.audio_source,'runtime_version':a.runtime_version,
+              'native_services':a.native_services,'video_mode':a.video_mode,
               'observer_sha256':sha(observer),'md_sha256':sha(a.md_jar),'selector':payload,
               'device_operations':0, 'requires_board_integration':True}
     (out/'BUILD.json').write_text(json.dumps(result, indent=2)+'\n')

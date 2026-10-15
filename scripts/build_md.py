@@ -26,6 +26,8 @@ TESTS = [
     'NativeTouchWireDiagnosticsTest', 'NativeAsyncTouchInjectionTest', 'NativeEncoderPriorityTest',
     'VideoDiagnosticPolicyTest', 'NativeVideoDiagnosticsEntryTest',
     'CarLifeAudioTest', 'PcmAudioSessionTest', 'NativeAudioSessionTest',
+    'SplitAudioSourceTest', 'VideoQueueTest', 'VideoRateControlTest', 'FrameRatePacingTest',
+    'NativeVideoFlowTest', 'VideoModeTest', 'NativeSplitAudioSessionTest', 'NativeServicesTest', 'NativeServicesStartupTest', 'NativeVoiceQueueTest', 'NativeServicesSessionTest',
 ]
 
 
@@ -85,7 +87,14 @@ def main():
     records = []
 
     def run(command, label):
-        result = subprocess.run([str(x) for x in command], cwd=ROOT, env=env, capture_output=True, text=True)
+        try:
+            result = subprocess.run([str(x) for x in command], cwd=ROOT, env=env, capture_output=True, text=True,
+                                    timeout=90 if label in TESTS else 180)
+        except subprocess.TimeoutExpired as error:
+            # A failed assertion may leave a worker alive. Keep its evidence and fail
+            # the build instead of hanging indefinitely before writing the logs.
+            decode = lambda value: value.decode('utf-8', errors='replace') if isinstance(value, bytes) else value or ''
+            result = subprocess.CompletedProcess(command, 124, decode(error.stdout), decode(error.stderr)+'\nTimed out: '+label)
         # Logs stay in ignored build output. Public report omits absolute toolchain paths.
         (out / (label + '.stdout.txt')).write_text(result.stdout)
         (out / (label + '.stderr.txt')).write_text(result.stderr)

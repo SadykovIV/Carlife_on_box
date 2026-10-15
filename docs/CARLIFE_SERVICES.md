@@ -1,5 +1,7 @@
 # Native CarLife services: audio, navigation and voice
 
+> This is the earlier design rationale. The implemented candidate and current limits are in [native services/video candidate](NATIVE_CANDIDATE.md).
+
 [Русский](ru/CARLIFE_SERVICES.md) · [Audio candidate](AUDIO_CANDIDATE.md)
 
 The mixed MEDIA source and HU audio receiver are implemented and tested offline. Device sound is not yet verified. Separated audio, navigation metadata and voice below are the next implementation steps, not installed features. The existing video/input baseline stays in place.

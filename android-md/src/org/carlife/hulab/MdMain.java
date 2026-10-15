@@ -228,6 +228,7 @@ public final class MdMain {
         }
         void send(int ch,int id,byte[] data)throws IOException{send(ch,id,data,-1);}
         void send(int ch,int id,byte[] data,long generation)throws IOException{sendWithTimestamp(ch,id,data,generation,(int)SystemClock.uptimeMillis());}
+        void sendAccessUnit(AvcAccessUnits.Au au,long generation)throws IOException{sendWithTimestamp(VIDEO,0x20001,au.bytes,generation,(int)(au.ptsUs/1000));}
         void sendWithTimestamp(int ch,int id,byte[] data,long generation,int timestamp)throws IOException{try{
             if(ch==VIDEO&&!sameVideoGeneration(generation,videoGeneration)){staleVideoEnqueueDrops.incrementAndGet();log("video_epoch_drop","discard stale source generation before enqueue");return;}
             Packet p=new Packet(packet(ch,id,data,timestamp),generation);

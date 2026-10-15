@@ -1,5 +1,7 @@
 # Lessons from HeadSwap releases
 
+> This is the historical review at 8c73aaa. Several items marked pending below are now implemented offline; see [native services/video candidate](NATIVE_CANDIDATE.md).
+
 [Русская версия](ru/HEADSWAP_LESSONS.md)
 
 This review maps all 19 entries in the supplied HeadSwap changelog to **native Android display projection** in Carlife_on_box. The reference is [HeadSwap v1.2.0](https://github.com/YegorkaPomidorka/headswap/releases/tag/v1.2.0), source commit [`0f5502a`](https://github.com/YegorkaPomidorka/headswap/tree/0f5502ab76e2f220b68fa1e2c85b66838f01fd81), checked on 2026-10-15.

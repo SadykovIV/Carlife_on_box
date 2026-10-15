@@ -56,6 +56,8 @@ public final class CarLifeFrameReaderTest {
         frame(shortTail,1,0x18009,"");frame(shortTail,1,0x1800a,"");
         // Data-channel framing uses12-byte header and the same per-channel assembly.
         frame(reader(join(outer(5,hex("000000030000000000058001")),outer(5,hex("010203")))),5,0x58001,"010203");
+        CarLifeFrameReader.Frame microphone=reader(join(outer(5,hex("00000004fffffff000058001")),outer(5,hex("01020304")))).readNext();
+        check(microphone.timestamp==-16&&microphone.id==0x58001&&Arrays.equals(microphone.payload,hex("01020304")),"microphone timestamp bits survive fragmented data header, including unsigned wrap");
         // Short inner without pending is diagnostic-only, as reference dispatch.
         frame(reader(join(outer(1,hex("0001")),outer(1,hex("0000000000018009")))),1,0x18009,"");
         // Boundary timeouts preserve pending until its absolute (non-sliding) deadline.

@@ -10,7 +10,14 @@ final class CarLifeAudio {
     static final int RATE=48000, CHANNELS=2, BITS=16, FRAME_BYTES=4;
     static final int CHUNK_FRAMES=960, CHUNK_BYTES=3840, MAX_QUEUED_DATA=10;
     static final long MAX_AGE_MS=200;
-    static byte[] init(){return MdMain.Proto.ints(1,RATE,2,CHANNELS,3,BITS);}
+    enum Lane {
+        MEDIA(3,0x30001,0x30002,0x30006,48000,2),
+        TTS(4,0x40001,0x40002,0x40003,16000,1);
+        final int channel,initId,stopId,dataId,rate,channels,bits=16,frameBytes,chunkFrames,chunkBytes;
+        Lane(int ch,int init,int stop,int data,int hz,int count){channel=ch;initId=init;stopId=stop;dataId=data;rate=hz;channels=count;frameBytes=count*2;chunkFrames=hz/50;chunkBytes=chunkFrames*frameBytes;}
+        byte[] init(){return MdMain.Proto.ints(1,rate,2,channels,3,bits);}
+    }
+    static byte[] init(){return Lane.MEDIA.init();}
     static byte[] musicStatus(boolean active)throws IOException{
         byte[] entry=MdMain.Proto.ints(1,3,2,active?1:0);
         ByteArrayOutputStream out=new ByteArrayOutputStream();out.write(MdMain.Proto.ints(1,1));
@@ -35,34 +42,38 @@ final class CarLifeAudio {
         }return result;
     }
     static final class Item {
-        final int id,timestamp;final byte[] payload;final long queued,epoch;
-        Item(int id,byte[] p,int time,long now,long token){this.id=id;payload=p;timestamp=time;queued=now;epoch=token;}
+        final int channel,id,timestamp;final byte[] payload;final long queued,epoch;
+        Item(int channel,int id,byte[] p,int time,long now,long token){this.channel=channel;this.id=id;payload=p;timestamp=time;queued=now;epoch=token;}
     }
     /** Same FIFO for INIT/DATA/STOP; only complete independent PCM chunks may be shed. */
     static final class Queue {
+        final Lane lane;
+        Queue(){this(Lane.MEDIA);}
+        Queue(Lane lane){if(lane==null)throw new NullPointerException("audio lane");this.lane=lane;}
         final ArrayDeque<Item> items=new ArrayDeque<Item>();long dropped,offered,written,nonzeroSamples,epoch;boolean initialized;
         synchronized long epoch(){return epoch;}
-        synchronized boolean current(Item item){return item.epoch==epoch;}
-        synchronized boolean start(long token,long now){if(token!=epoch)return false;Iterator<Item> old=items.iterator();while(old.hasNext())if(old.next().id!=STOP)old.remove();initialized=true;items.add(new Item(INIT,init(),0,now,token));return true;}
+        synchronized boolean current(Item item){return item.channel==lane.channel&&item.epoch==epoch;}
+        synchronized boolean start(long token,long now){if(token!=epoch)return false;Iterator<Item> old=items.iterator();while(old.hasNext())if(old.next().id!=lane.stopId)old.remove();initialized=true;items.add(new Item(lane.channel,lane.initId,lane.init(),0,now,token));return true;}
         synchronized void data(long token,byte[] p,int timestamp,long now)throws IOException{
             if(token!=epoch||!initialized)return;
-            if(p.length==0||p.length>CHUNK_BYTES||p.length%FRAME_BYTES!=0)throw new IOException("PCM chunk alignment/size");
-            int data=0;for(Item i:items)if(i.id==DATA)data++;
-            if(data>=MAX_QUEUED_DATA){Iterator<Item> it=items.iterator();while(it.hasNext())if(it.next().id==DATA){it.remove();dropped++;break;}}
-            items.add(new Item(DATA,p.clone(),timestamp,now,token));offered++;
+            if(p.length==0||p.length>lane.chunkBytes||p.length%lane.frameBytes!=0)throw new IOException("PCM chunk alignment/size");
+            int data=0;for(Item i:items)if(i.id==lane.dataId)data++;
+            if(data>=MAX_QUEUED_DATA){Iterator<Item> it=items.iterator();while(it.hasNext())if(it.next().id==lane.dataId){it.remove();dropped++;break;}}
+            items.add(new Item(lane.channel,lane.dataId,p.clone(),timestamp,now,token));offered++;
             for(int i=0;i<p.length;i+=2)if(p[i]!=0||p[i+1]!=0)nonzeroSamples++;
         }
         synchronized void stop(long token,long now){
             if(token!=epoch||!initialized)return;
             // An INIT already in flight remains before STOP in the single transport writer.
-            for(Item item:items)if(item.id==DATA)dropped++;items.clear();items.add(new Item(STOP,new byte[0],0,now,token));initialized=false;
+            for(Item item:items)if(item.id==lane.dataId)dropped++;items.clear();items.add(new Item(lane.channel,lane.stopId,new byte[0],0,now,token));initialized=false;
         }
         synchronized Item poll(long now){
-            while(!items.isEmpty()){Item i=items.remove();if(i.id==DATA&&now-i.queued>MAX_AGE_MS){dropped++;continue;}return i;}return null;
+            while(!items.isEmpty()){Item i=items.remove();if(i.id==lane.dataId&&now-i.queued>MAX_AGE_MS){dropped++;continue;}return i;}return null;
         }
         synchronized int size(){return items.size();}
         synchronized void wrote(){written++;}
-        synchronized void appendProgress(List<Object> fields){Collections.addAll(fields,"audio_queue_items",items.size(),"audio_pcm_chunks_enqueued",offered,"audio_packets_written",written,"audio_pcm_chunks_dropped",dropped,"audio_nonzero_samples",nonzeroSamples,"audio_queue_age_budget_ms",MAX_AGE_MS);}
+        synchronized void appendProgress(List<Object> fields){appendProgress(fields,"audio");}
+        synchronized void appendProgress(List<Object> fields,String prefix){Collections.addAll(fields,prefix+"_queue_items",items.size(),prefix+"_pcm_chunks_enqueued",offered,prefix+"_packets_written",written,prefix+"_pcm_chunks_dropped",dropped,prefix+"_nonzero_samples",nonzeroSamples,prefix+"_queue_age_budget_ms",MAX_AGE_MS);}
         synchronized void clear(){epoch++;items.clear();initialized=false;}
     }
 }
