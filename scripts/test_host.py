@@ -15,7 +15,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--core", "--stdlib-only", action="store_true", help="stdlib-only framing, geometry, touch, transport and CLI tests")
     args = parser.parse_args()
-    names = ["test_carlife_protocol", "test_carlife_touch_geometry", "test_native_usb",
+    names = ["test_carlife_protocol", "test_carlife_audio", "test_carlife_touch_geometry", "test_native_usb",
              "test_projection_config", "test_gui_action_schedule", "test_public_hu"]
     if not args.core:
         names += ["test_carlife_client", "test_gui_mouse_events"]

@@ -18,6 +18,13 @@ def positive(value):
     return number
 
 
+def audio_budget(value):
+    number = float(value)
+    if not 0 < number <= 1024:
+        raise argparse.ArgumentTypeError("audio capture budget must be greater than zero and at most 1024 MiB")
+    return number
+
+
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
     commands = result.add_subparsers(dest="command", required=True)
@@ -37,6 +44,9 @@ def parser():
         run.add_argument("--allow-mode-fallback", action="store_true", help="accept a different valid video mode announced by MD")
         run.add_argument("--trace-mode", choices=("full", "sampled"), default="sampled")
         run.add_argument("--headless", action="store_true", help="decode and save evidence without a window")
+        run.add_argument("--audio-capture", action="store_true", help="also save bounded MEDIA/TTS PCM as WAV; no live audio playback")
+        run.add_argument("--audio-capture-limit-mib", type=audio_budget, default=8,
+                         help="combined PCM WAV limit per HU session (default: 8 MiB); raw rx.bin has its own existing budget")
         if command == "usb":
             run.add_argument("--device", required=True, help="exact physical_key from discover, e.g. 1:2.3")
             run.add_argument("--aoa-start", action="store_true", help="explicitly permit one AOA switch; it may disconnect USB ADB")
@@ -89,7 +99,8 @@ def main(argv=None):
         touch_profile=arguments.touch_profile, trace_mode=arguments.trace_mode,
         display_policy=arguments.display_policy, rotation=arguments.rotation,
         allow_mode_fallback=arguments.allow_mode_fallback, transport_factory=factory,
-        backend="DIRECT_USB_AOA" if factory else "DEV_STREAM_OVER_ADB")
+        backend="DIRECT_USB_AOA" if factory else "DEV_STREAM_OVER_ADB",
+        audio_capture=arguments.audio_capture, audio_capture_limit_mib=arguments.audio_capture_limit_mib)
     print(f"Evidence: {output.resolve()}", flush=True)
     if arguments.headless:
         summary = headless(host, port, output, arguments.duration, options)

@@ -70,16 +70,24 @@ python -m hu_lab tcp --host 127.0.0.1 --port LOCAL_PORT --duration 60
 
 Replace all uppercase placeholders. The HU never invokes ADB, starts Android processes or chooses a device on your behalf. This transport is labelled `DEV_STREAM_OVER_ADB` and is not a native USB acceptance result. It is not the legacy six-socket CarLife transport.
 
+## Audio evidence
+
+The HU independently parses CarLife MEDIA and TTS PCM INIT/DATA/STOP, plus MEDIA PAUSE/RESUME. `summary.json` records the actual format, received complete PCM frames, dropped/incomplete bytes and lane errors. A malformed audio payload disables only that lane until a valid INIT; video continues. A corrupt shared transport frame still terminates the session because framing is no longer trustworthy.
+
+Add `--audio-capture --audio-capture-limit-mib 8` to a `usb` or `tcp` run to save `audio/media-NNNN.wav` and `audio/tts-NNNN.wav`. Each valid INIT starts a new generation/file. The default captures no separate WAV; existing bounded raw `rx.bin` still includes received audio packets. Capture does not enable the Android PCM source: the MD must separately be started with its audio option. This HU candidate does not play audio through the Mac speakers.
+
+WAV files share an 8 MiB PCM budget per HU session by default, in addition to the existing trace budget; reconnect starts another session. At most 64 files are retained. Disk writing uses a separate queue bounded to 200 ms and discards packets older than 250 ms. Drops are reported: a WAV with gaps is not proof of continuous playback or end-to-end latency. No microphone is requested by this capture option.
+
 ## Evidence and offline tests
 
-Runs retain bounded local `trace.jsonl`, `rx.bin`, `tx.bin`, `video.h264`, frame PNGs and `summary.json`; window runs add `gui-summary.json`. USB runs also retain selection and transport events. Captures can include your display, touches and device metadata: review them before sharing. Raw traces are not included in this repository.
+Runs retain bounded local `trace.jsonl`, `rx.bin`, `tx.bin`, `video.h264`, frame PNGs and `summary.json`; window runs add `gui-summary.json`. USB runs also retain selection and transport events. Captures can include your display, touches, audio PCM in `rx.bin`, and device metadata: review them before sharing. Raw traces are not included in this repository.
 
 ```sh
-python scripts/test_host.py --core  # 78 stdlib-only tests, no hardware
-python scripts/test_host.py         # 97 tests including Qt/PyAV, no hardware
+python scripts/test_host.py --core  # stdlib-only tests, no hardware
+python scripts/test_host.py         # includes Qt/PyAV, no hardware
 python -m hu_lab replay runs/YOUR_RUN/rx.bin
 ```
 
 The exported suite covers literal wire bytes, fragmentation, bounded media queues, geometry, touch lifecycle, native USB partial transfers/start/reconnect, RESET generation fencing, and decoding the first complete static frame before EOF. Video fixtures are generated at test time. These are offline regressions, not proof of compatibility with every box or vehicle.
 
-The authentication profile is `SYNTHETIC_NO_AUTH_V1`, with `SELF` interoperability scope for the two project endpoints. Unknown authentication/encryption requirements stop explicitly. Audio, microphone, voice integration and the legacy six-socket transport are not implemented. Encoder PTS, host receipt and Qt paint completion are separate metrics; none alone measures physical touch-to-display latency.
+The authentication profile is `SYNTHETIC_NO_AUTH_V1`, with `SELF` interoperability scope for the two project endpoints. Unknown authentication/encryption requirements stop explicitly. MEDIA/TTS audio format parsing and optional WAV evidence are implemented; live host audio playback, microphone/voice integration and the legacy six-socket transport are not implemented. Encoder PTS, host receipt and Qt paint completion are separate metrics; none alone measures physical touch-to-display latency.

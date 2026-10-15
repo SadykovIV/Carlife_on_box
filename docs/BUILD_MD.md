@@ -40,7 +40,7 @@ Output:
 - `build/md/manifest.json`: source/tool hashes and the test result.
 - `build/md/*.stdout.txt`, `*.stderr.txt`, `steps.json`: local build evidence.
 
-Use `--output /path/to/output` to keep a separate build. Test-only mode compiles both source layers and runs all 26 JVM suites without requiring D8:
+Use `--output /path/to/output` to keep a separate build. Test-only mode compiles both source layers and runs all 31 JVM suites without requiring D8:
 
 ```sh
 python3 scripts/build_md.py --test-only
@@ -52,9 +52,9 @@ The DEX minimum API is 21; this is a bytecode setting, **not** a claim that the 
 
 The host suite covers wire framing and fragmented packets, RESET and writer/watchdog races, encoder teardown/draining, source lease ownership, SPS/PPS and access-unit handling, the OEM CSD guard, geometry/touch mapping, accessory ownership/recovery, PAUSE/heartbeat, asynchronous touch dispatch, feature/touch diagnostics and video logging policy. Android API stubs under test directories are host-only and never enter the DEX.
 
-Three synthetic gray-image libx264 fixtures are stored as `.h264.hex` text. Their decoded SHA256 values are checked against `android-md/tests/fixtures/provenance.json` before tests. They contain no device recording. Only the test loader differs from the development tree to read these text fixtures; production Java is unchanged.
+Three synthetic gray-image libx264 fixtures are stored as `.h264.hex` text. Their decoded SHA256 values are checked against `android-md/tests/fixtures/provenance.json` before tests. They contain no device recording. The baseline publication changed only the fixture loader. The current audio/multitouch candidate also changes production source; see [candidate status](AUDIO_CANDIDATE.md).
 
-The publication build passed all **26 suites**. Using the existing JDK 17.0.16, API 35 and R8 8.3.37 toolchain produced the exact installed baseline:
+The original publication at commit `3b344d45ae34df215166385ba0c65f195652f5d8` passed all **26 suites**. Using the existing JDK 17.0.16, API 35 and R8 8.3.37 toolchain produced the exact installed baseline:
 
 ```text
 347c6ef1fdf0fa25d0c8ae4bd333c8cfce2ed6ed6d7c70cba9b6cbd1c55b87dd  md-boot-native.jar
@@ -68,7 +68,7 @@ Pass the resulting JAR to the board-specific runtime build/deployment described 
 
 The tested native path mirrors the actual Android display through EGL into a MediaCodec Surface, sends H.264 through direct USB accessory I/O, and injects CarLife input with the process's existing privileges. It requires the board's USB/accessory support, compatible mirroring APIs and appropriate input/capture permissions. Do not remove the source lease, RESET generation checks or OEM CSD guard to make an incompatible board appear supported. The exceptional CSD source selection is tied to a measured OEM library hash; it must be evaluated for the target firmware.
 
-Audio, microphone/voice and mandatory head-unit authentication/encryption are not implemented. Multi-pointer parsers exist, but the tested Honda head unit did not provide confirmed second-pointer coordinates in the observed CarLife mode. These are separate from a successful build.
+An opt-in output-audio candidate is [implemented and tested offline](AUDIO_CANDIDATE.md). Microphone/voice, separate TTS and mandatory head-unit authentication/encryption are not implemented. Multi-pointer parsers exist, but the tested Honda head unit did not provide confirmed second-pointer coordinates in the observed CarLife mode. These are separate from a successful build.
 
 ## Optional: OEM selector APK integration
 

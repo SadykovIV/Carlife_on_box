@@ -20,6 +20,7 @@ import traceback
 import uuid
 
 from .protocol import *
+from .audio import AudioReceiver
 from .touch import TouchFrame, Pointer, TouchTracker, encode_touch, profile_name, two_pointer_gesture, CANCEL
 from .geometry import ViewportTransform, SourceDisplayTransform, Rect
 
@@ -319,7 +320,8 @@ class HUClient:
                  touch_profile="legacy-single", capture_limit_mib=None, trace_mode="full",
                  display_policy="fit", rotation=0, source_size=None, source_policy="fit",
                  allow_mode_fallback=False, on_decoded_frame=None,
-                 transport_factory=None, backend="DEV_STREAM_OVER_ADB"):
+                 transport_factory=None, backend="DEV_STREAM_OVER_ADB",
+                 audio_capture=False, audio_capture_limit_mib=8):
         if backend not in ("DEV_STREAM_OVER_ADB", "DIRECT_USB_AOA"):
             raise ValueError("unsupported transport backend")
         if (backend == "DIRECT_USB_AOA") != (transport_factory is not None):
@@ -328,7 +330,7 @@ class HUClient:
             raise ValueError("development transport must remain loopback")
         self.backend, self.transport_factory = backend, transport_factory
         self.io_stage = "usb_bulk" if backend == "DIRECT_USB_AOA" else "socket"
-        self.host, self.port, self.timeout = host, int(port), timeout
+        self.host, self.port, self.timeout = host, (0 if transport_factory is not None else int(port)), timeout
         self.output_dir = Path(output_dir)
         self.session = HUSession(width, height, fps, allow_mode_fallback=allow_mode_fallback)
         self.touch_profile = profile_name(touch_profile)
@@ -339,8 +341,13 @@ class HUClient:
         self.capture_limit = int((capture_limit_mib if capture_limit_mib is not None else 128) * 1024 * 1024)
         if self.capture_limit < 1024 or trace_mode not in ("full", "sampled"):
             raise ValueError("invalid capture budget or trace mode")
+        if audio_capture and audio_capture_limit_mib <= 0:
+            raise ValueError("invalid audio capture budget")
         self.session_id = uuid.uuid4().hex
         self.trace = Trace(output_dir, self.capture_limit, trace_mode)
+        self.audio = AudioReceiver(event=self.trace.event,
+            capture_directory=self.output_dir / "audio" if audio_capture else None,
+            capture_limit_bytes=int(audio_capture_limit_mib * 1024 * 1024))
         self.video_retained_bytes = 0
         self.video_capture_truncated = False
         self.trace.event("configuration", session_id=self.session_id, backend=self.backend, profile=self.session.profile,
@@ -587,7 +594,8 @@ class HUClient:
             self._check_native_handshake_deadline()
             received_ns = received_ns or time.monotonic_ns()
             if (self.backend == "DIRECT_USB_AOA" and self.session.state == "WAIT_VERSION" and
-                    packet.channel == VIDEO and packet.message in (VIDEO_DATA, VIDEO_HEARTBEAT)):
+                    ((packet.channel == VIDEO and packet.message in (VIDEO_DATA, VIDEO_HEARTBEAT))
+                     or packet.channel in (MEDIA, TTS))):
                 # Releasing a libusb interface is not a USB detach. A prior
                 # PAUSE/closed HU may leave complete old media in the endpoint.
                 # Discard only framed media before the fresh VERSION_MATCH.
@@ -673,6 +681,7 @@ class HUClient:
                         self.media.put(MediaChunk(self.decoder_generation, data, received_ns=received_ns))
             elif packet.channel in (MEDIA, TTS, VR):
                 self.audio_packets[{MEDIA: "MEDIA", TTS: "TTS", VR: "VR"}[packet.channel]] += 1
+                self.audio.receive(packet)
 
     def _inspect_sps(self, data):
         if self.sps is not None:
@@ -1117,6 +1126,7 @@ class HUClient:
                 "evidence_png": {**dict(self.png_counts), "pending": len(self.png_pending),
                                  "worker_alive": bool(self.png_thread and self.png_thread.is_alive())},
                 "input_packets_sent": self.input_packets, "audio_packet_counts": self.audio_packets,
+                "audio": self.audio.summary(),
                 "unknown_messages": self.session.unknown, "duplicate_messages": self.session.duplicates,
                 "md_info": self.session.md_info, "sps": self.sps, "sps_validation": self.sps_validation,
                 "decoder_generation": self.decoder_generation,
@@ -1176,6 +1186,7 @@ class HUClient:
         self.media.close()
         for thread in self.threads:
             thread.join(timeout=3)
+        self.audio.close()
         with self.png_condition:
             self.png_closed = True
             self.png_condition.notify_all()

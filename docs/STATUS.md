@@ -18,7 +18,11 @@ The physical mode-button experiment measured one approximately 3.26-second press
 
 Two-finger experiments did not establish independent coordinates for the second finger on the tested Honda. No conclusion is made about the physical touchscreen's general multitouch capability.
 
-## Source publication checks
+## Candidate prepared on 15 October 2026
+
+The preserved publication baseline below is historical. The feature branch adds opt-in output PCM, MEDIA/TTS evidence in HU, legacy gesture multitouch and startup phase timings. It does not replace hardware acceptance: the device was unavailable and no device state changed. Current offline checks: 31 MD JVM suites, 116 full HU tests, 91 runtime tests and 9 candidate-package tests. See [implementation, build and hardware plan](AUDIO_CANDIDATE.md) and [additional CarLife services](CARLIFE_SERVICES.md).
+
+## Source publication checks (baseline commit 3b344d4)
 
 - All 21 production MD Java sources are unchanged from the working development baseline.
 - The portable MD builder passed 26 JVM suites and reproduced JAR SHA-256 `347c6ef1fdf0fa25d0c8ae4bd333c8cfce2ed6ed6d7c70cba9b6cbd1c55b87dd` with the original toolchain.

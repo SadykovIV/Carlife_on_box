@@ -1,5 +1,7 @@
 """Standalone CLI and explicit USB selection, using only fake host devices."""
 from dataclasses import asdict, replace
+from contextlib import redirect_stdout, redirect_stderr
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -57,6 +59,25 @@ class PublicHUTests(unittest.TestCase):
         self.assertFalse(args.aoa_start)
         args = parser().parse_args(["usb", "--device", "1:2.3", "--aoa-start"])
         self.assertTrue(args.aoa_start)
+
+    def test_audio_wav_is_opt_in_and_budget_is_validated(self):
+        args = parser().parse_args(["tcp", "--port", "7240"])
+        self.assertFalse(args.audio_capture)
+        self.assertEqual(args.audio_capture_limit_mib, 8)
+        for value in ("0", "-1", "nan", "inf", "1025"):
+            with self.subTest(value=value), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                parser().parse_args(["tcp", "--port", "7240", "--audio-capture-limit-mib", value])
+
+    def test_audio_cli_passes_options_to_client_runner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "new"
+            with patch("hu_lab.__main__.headless", return_value={}) as run, \
+                 patch("hu_lab.__main__.importlib.import_module"), redirect_stdout(io.StringIO()):
+                result = main(["tcp", "--port", "7240", "--headless", "--output", str(output),
+                               "--audio-capture", "--audio-capture-limit-mib", "2"])
+            self.assertEqual(result, 0)
+            self.assertTrue(run.call_args.args[-1]["audio_capture"])
+            self.assertEqual(run.call_args.args[-1]["audio_capture_limit_mib"], 2)
 
     def test_invalid_video_mode_has_no_usb_side_effect(self):
         with patch("hu_lab.__main__.prepare_usb", side_effect=AssertionError("USB must not be touched")):

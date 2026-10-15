@@ -33,6 +33,60 @@ final class TouchFrame {
         float[]x=new float[ids.length],y=new float[ids.length];x[0]=MdMain.Proto.number(fields,2,-1);y[0]=MdMain.Proto.number(fields,3,-1);if(ids.length==2){x[1]=MdMain.Proto.number(fields,4,-1);y[1]=MdMain.Proto.number(fields,5,-1);}
         return new TouchFrame(a,ids,x,y,display,gen,time,dual?"legacy-dual":"legacy-single");
     }
+    /** Streaming legacy messages; discrete click/long-press notifications are not MotionEvent CANCEL. */
+    static boolean isLegacyStream(int id){return id==0x68001||id==0x68002||id==0x68003||id==0x68004||id==0x6800a||id==0x6800b||id==0x6800c||id==0x6800d;}
+    static int legacyStreamAction(int id,Map<Integer,Object> fields)throws IOException{
+        switch(id){
+            case 0x68001:return touchInteger(fields,1);
+            case 0x68002:case 0x6800a:return 0;
+            case 0x68003:return 1;
+            case 0x68004:return 2;
+            case 0x6800b:return 0x105;
+            case 0x6800c:return 6;
+            case 0x6800d:return 0x106;
+            default:throw new IOException("not a streaming legacy touch message");
+        }
+    }
+    private static int touchInteger(Map<Integer,Object> fields,int field)throws IOException{
+        Object value=fields.get(field);
+        if(!(value instanceof Long)||((Long)value)<0||((Long)value)>Integer.MAX_VALUE)throw new IOException("invalid touch integer field "+field);
+        return ((Long)value).intValue();
+    }
+    /**
+     * Decode either legacy action protobuf or streaming gesture opcodes using raw video coordinates.
+     * The caller owns rawState separately from its mapped Android state, accepts this frame only
+     * after successful processing, and clears both states on cancellation/session/geometry changes.
+     * Optional-field presence matters: an explicit (0,0) is a valid point, not an absent contact.
+     * An explicit second-pointer DOWN without its optional position is rejected: the event proves
+     * another contact exists, but does not locate it. MOVE/UP may retain an already measured point.
+     */
+    static TouchFrame legacyCompatible(int id,Map<Integer,Object> fields,State rawState,int display,long gen,long time)throws IOException{
+        int a=legacyStreamAction(id,fields),masked=a&255,index=(a>>>8)&255;
+        if((a&0xffff0000)!=0||(masked!=0&&masked!=1&&masked!=2&&masked!=3&&masked!=5&&masked!=6)||((masked!=5&&masked!=6)&&index!=0)||index>1)throw new IOException("invalid legacy touch action");
+        int first=id==0x68001?2:1,second=first+2;
+        int x0=touchInteger(fields,first),y0=touchInteger(fields,first+1);
+        boolean pair=fields.containsKey(second);
+        if(pair!=fields.containsKey(second+1))throw new IOException("incomplete optional pointer coordinate pair");
+        int x1=pair?touchInteger(fields,second):0,y1=pair?touchInteger(fields,second+1):0;
+        int[] ids;
+        if(masked==0)ids=new int[]{0};
+        else if(masked==5){
+            if(rawState.ids.length!=1)throw new IOException("legacy pointer-down requires one active contact");
+            ids=new int[2];ids[index]=rawState.ids[0]==0?1:0;ids[1-index]=rawState.ids[0];
+        }else ids=rawState.ids.clone();
+        if(ids.length<1||ids.length>2)throw new IOException("legacy pointer lifecycle unavailable");
+        float[] x=new float[ids.length],y=new float[ids.length];x[0]=x0;y[0]=y0;
+        if(ids.length==2){
+            if(pair){x[1]=x1;y[1]=y1;}
+            else {
+                int previous=-1;
+                if(rawState.last!=null)for(int i=0;i<rawState.last.ids.length;i++)if(rawState.last.ids[i]==ids[1])previous=i;
+                if(previous>=0){x[1]=rawState.last.xs[previous];y[1]=rawState.last.ys[previous];}
+                else throw new IOException("missing second pointer position/history");
+            }
+        }
+        return new TouchFrame(a,ids,x,y,display,gen,time,ids.length==2?"legacy-dual":"legacy-single");
+    }
     static final class State {
         int[] ids=new int[0];TouchFrame last;long downTime;
         void clear(){ids=new int[0];last=null;}

@@ -25,7 +25,8 @@ A fresh system integration seeds **Baidu CarLife** as the default. A later owner
 | Reference native runtime | Tested on the development box with a Honda head unit |
 | Full integrated OTA candidate | Built and checked offline; **not installed or boot-tested** |
 | Other Android boxes | Require a device profile and hardware validation |
-| Audio, microphone and voice | Not implemented |
+| Audio | Opt-in native PCM candidate; offline tests pass, hardware playback unverified |
+| Separate TTS/voice, microphone and navigation metadata | Design documented; native producers not implemented |
 | Head units requiring authentication/encryption | No compatible provider implemented |
 | Honda multitouch | Packet support exists; independent second-finger coordinates were not obtained in the tested mode |
 | Hardware RESET mode switching | Button event and CarPlay dialog verified; actual switch and a three-mode cycle not verified/implemented |
@@ -40,7 +41,8 @@ The full OTA and proprietary OEM applications are not distributed here. This rep
 2. [Build the runtime and system overlay](docs/BUILD_RUNTIME.md) — observer, selector service and exact SM6350 integration.
 3. [Port to another Android box](docs/PORTING.md) — locate its early projection owner and adapt USB, video, input, permissions and selection.
 4. [Run the Mac/Linux HU lab](docs/HU_LAB.md) — native USB test head unit, development TCP transport and packet replay.
-5. [Read the validation record](docs/STATUS.md) — what was tested and what remains unverified.
+5. [Audio candidate and HeadSwap review](docs/AUDIO_CANDIDATE.md) — source changes, startup findings and hardware plan.
+6. [Read the validation record](docs/STATUS.md) — what was tested and what remains unverified.
 
 For a dependency-light offline check (Python 3.11+, a C compiler):
 

@@ -21,6 +21,8 @@ jobs:
         run: python scripts/test_host.py --stdlib-only
       - name: Runtime and observer regressions
         run: python -m unittest discover -s tests -p 'test_boot_native_*.py'
+      - name: Candidate runtime packaging options
+        run: python -m unittest discover -s tests -p test_build_runtime_options.py
       - name: Saved selector tests
         run: python -m unittest discover -s tools/boot_native/selector/tests -p 'test_*.py'
       - name: System provisioning against synthetic fixtures
@@ -53,5 +55,5 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Compile and run the 26 JVM suites
+      - name: Compile and run the MD JVM suites
         run: python scripts/build_md.py --test-only --android-jar "$ANDROID_HOME/platforms/android-35/android.jar"

@@ -14,6 +14,7 @@ STOP=0; PHASE=INITIALIZING; RUN_ID=; GENERATION=0; USB_OWNED=0
 DETACH_ARMED=0; DETACH_SINCE=0; ATTACH_FAILURES=0; MD_EXIT_SINCE=0
 FLOATING_NAV_ATTEMPTED=0
 QCOM_MAIN_BOOTSTRAP_ATTEMPTED=0
+RUN_STARTED_MS=unknown; PHASE_STARTED_MS=unknown
 b() { timeout -k 1 3 "$@"; }
 
 readf() {
@@ -54,6 +55,10 @@ now_cs() {
     ct_s=${ct_up%%.*}; ct_f=${ct_up#*.}00; ct_f=${ct_f%"${ct_f#??}"}
     number "$ct_s" && number "$ct_f" || return 1
     printf '%s\n' "$((ct_s * 100 + 1$ct_f - 100))"
+}
+now_ms() {
+    nm_cs=$(now_cs) || return 1
+    printf '%s\n' "$((nm_cs * 10))"
 }
 observe_udc() {
     # Monotonic centiseconds: crossing an integer second is not a full second.
@@ -265,11 +270,28 @@ log() {
         log_size=$(b stat -c %s "$P/logs/controller.log") || return 1
         if [ "$log_size" -ge 131072 ]; then b mv "$P/logs/controller.log" "$P/logs/controller.1.log" || return 1; fi
     fi
-    printf 'boot=%s uptime=%s pid=%s run=%s generation=%s phase=%s event=%s\n' "$BOOT" "$(now)" "$$" "$RUN_ID" "$GENERATION" "$PHASE" "$*" >> "$P/logs/controller.log"
+    # /proc/uptime includes suspend; MD uptimeMillis does not. Label the clock
+    # explicitly and compare boot stages only before any suspend (10 ms resolution).
+    # Timing is diagnostic only: an unavailable clock must not add a new gate.
+    log_ms=$(now_ms) || log_ms=unknown
+    log_run_elapsed=unknown; log_phase_elapsed=unknown
+    if number "$log_ms"; then
+        log_seconds=$((log_ms / 1000))
+        if number "$RUN_STARTED_MS" && [ "$log_ms" -ge "$RUN_STARTED_MS" ]; then log_run_elapsed=$((log_ms-RUN_STARTED_MS)); fi
+        if number "$PHASE_STARTED_MS" && [ "$log_ms" -ge "$PHASE_STARTED_MS" ]; then log_phase_elapsed=$((log_ms-PHASE_STARTED_MS)); fi
+    else log_seconds=$(now); fi
+    printf 'boot=%s uptime=%s pid=%s run=%s generation=%s phase=%s clock=proc_uptime boot_elapsed_ms=%s run_elapsed_ms=%s phase_elapsed_ms=%s event=%s\n' "$BOOT" "$log_seconds" "$$" "$RUN_ID" "$GENERATION" "$PHASE" "$log_ms" "$log_run_elapsed" "$log_phase_elapsed" "$*" >> "$P/logs/controller.log"
 }
 phase() {
+    phase_previous=$PHASE; phase_previous_elapsed=unknown
+    phase_ms=$(now_ms) || phase_ms=unknown
+    if number "$phase_ms" && number "$PHASE_STARTED_MS" && [ "$phase_ms" -ge "$PHASE_STARTED_MS" ]; then
+        phase_previous_elapsed=$((phase_ms-PHASE_STARTED_MS))
+    fi
+    # Repeated WAIT_GADGET_DIRECTORIES must retain the start of that wait.
+    [ "$PHASE" = "$1" ] || PHASE_STARTED_MS=$phase_ms
     PHASE=$1
-    atomic status "$(printf 'contract=BOOT_NATIVE_RUNTIME_V1\nphase=%s\nboot_id=%s\nrun_id=%s\ncontroller_pid=%s\ngeneration=%s\neffective_backend=carlife\nselection_scope=PINNED_AT_BOOT_ADMISSION\norigin=BOOT_NATIVE_SERVICE_CANDIDATE\ntransport=DIRECT_USB_AOA\nmedia_validation=DISPLAY_PLUS_CODEC_CAPABILITIES_NOT_ENCODER_START\n' "$PHASE" "$BOOT" "$RUN_ID" "$$" "$GENERATION")" && log PHASE
+    atomic status "$(printf 'contract=BOOT_NATIVE_RUNTIME_V1\nphase=%s\nboot_id=%s\nrun_id=%s\ncontroller_pid=%s\ngeneration=%s\neffective_backend=carlife\nselection_scope=PINNED_AT_BOOT_ADMISSION\norigin=BOOT_NATIVE_SERVICE_CANDIDATE\ntransport=DIRECT_USB_AOA\nmedia_validation=DISPLAY_PLUS_CODEC_CAPABILITIES_NOT_ENCODER_START\n' "$PHASE" "$BOOT" "$RUN_ID" "$$" "$GENERATION")" && log "PHASE previous_phase=$phase_previous previous_phase_elapsed_ms=$phase_previous_elapsed ${2-}"
 }
 bootstrap_qcom_main_once() {
     # sdAutoReverse used to request the common Qualcomm main services. Native
@@ -491,9 +513,12 @@ configure_discovery() {
     # Last pre-bind check. External init/configfs is not a CAS; runtime logs drift.
     same_boot && oem_absent && read_md_ready && observer_ready && read_is "$G/UDC" '' || return 1
     atomic usb.intent "$RUN_ID $BOOT DISCOVERY" && log DISCOVERY_BIND_INTENT || return 1
-    write_node "$G/UDC" a600000.dwc3 && physical_profile mtp || return 1
+    discovery_bind_start_ms=$(now_ms) || discovery_bind_start_ms=unknown
+    write_node "$G/UDC" a600000.dwc3 || return 1
+    discovery_bind_return_ms=$(now_ms) || discovery_bind_return_ms=unknown
+    physical_profile mtp || return 1
     USB_OWNED=1
-    phase USB_DISCOVERY
+    phase USB_DISCOVERY "bind_start_boot_elapsed_ms=$discovery_bind_start_ms bind_return_boot_elapsed_ms=$discovery_bind_return_ms"
 }
 enter_accessory() {
     observer_completed && kernel_start_ok && physical_profile mtp && oem_absent && identity md || return 1
@@ -501,12 +526,15 @@ enter_accessory() {
     # Keep MD + native reader open through transition; first HU bytes have an owner.
     write_node "$G/UDC" '' && read_is "$G/UDC" '' && accessory_unchanged && clear_known_links || return 1
     write_node "$G/idProduct" 0x2d00 && b ln -s "$G/functions/$ACC_FUNCTION" "$G/configs/b.1/f1" || return 1
-    write_node "$G/UDC" a600000.dwc3 && physical_profile accessory || return 1
+    accessory_bind_start_ms=$(now_ms) || accessory_bind_start_ms=unknown
+    write_node "$G/UDC" a600000.dwc3 || return 1
+    accessory_bind_return_ms=$(now_ms) || accessory_bind_return_ms=unknown
+    physical_profile accessory || return 1
     USB_OWNED=1
     # The verified START already proves a host connection. Reenumeration can
     # lose it before polling observes configured; still require a full detach interval.
     DETACH_ARMED=1; DETACH_SINCE=0; ATTACH_FAILURES=0
-    phase ACCESSORY_CONNECTED
+    phase ACCESSORY_CONNECTED "bind_start_boot_elapsed_ms=$accessory_bind_start_ms bind_return_boot_elapsed_ms=$accessory_bind_return_ms"
 }
 recovery_reason() {
     RECOVERY_REASON=NONE
@@ -660,6 +688,8 @@ if [ "$ACTION" = stop ]; then
     printf 'REFUSED=stop_timeout_no_blind_usb_restore\n' >&2; exit 71
 fi
 BOOT=$(readf /proc/sys/kernel/random/boot_id) || exit 70
+RUN_STARTED_MS=$(now_ms) || RUN_STARTED_MS=unknown
+PHASE_STARTED_MS=$RUN_STARTED_MS
 claim_owner || { printf 'REFUSED=owner_claim\n' >&2; exit 70; }
 trap 'STOP=1' TERM INT
 phase BOOTSTRAP || fail STATUS

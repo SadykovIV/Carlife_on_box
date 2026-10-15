@@ -18,6 +18,7 @@ public final class MdMain {
     static volatile Session active;
     static ServerSocket server;
     static String transportMode="dev-stream";
+    static String audioSource="off";
     static boolean bootNative;
     static String bootStateFile,bootNonce;
     static BootNativeReadiness bootReadiness;
@@ -55,6 +56,7 @@ public final class MdMain {
             if(args[i].equals("--boot-state-file")){bootStateFile=args[i+1];continue;}
             if(args[i].equals("--boot-nonce")){bootNonce=args[i+1];continue;}
             if(args[i].equals("--transport")){transportMode=choice(args[i+1],"dev-stream","native-usb");continue;}
+            if(args[i].equals("--audio-source")){audioSource=choice(args[i+1],"off","remote-submix");continue;}
             if(args[i].equals("--log-dir")){logDirectory=args[i+1];continue;}
             if(args[i].equals("--video-source")){videoSource=args[i+1];if(!videoSource.equals("bootstrap")&&!videoSource.equals("mediacodec"))throw new IllegalArgumentException("video source must be bootstrap or mediacodec");continue;}
             if(args[i].equals("--encoder")){encoderName=args[i+1];if(!encoderName.equals("OMX.qcom.video.encoder.avc")&&!encoderName.equals("c2.qti.avc.encoder")&&!encoderName.equals("c2.android.avc.encoder"))throw new IllegalArgumentException("encoder outside laboratory whitelist");continue;}
@@ -98,7 +100,7 @@ public final class MdMain {
         else verifyDisplay();
         logFields("projection_policy","video_source",videoSource,"video_path",videoPath,"csd_source",csdSource,"touch_profile",touchProfile,"source_display_id",sourceDisplayId,"source_width",displayWidth,"source_height",displayHeight,"source_density_dpi",sourceDensity,"density_provenance",sourceDensity==0?"unknown":"runtime/manual/owned display declared by launcher","compatibility","SELF explicit lab profile");
         if(!nativeUsb){server=new ServerSocket();server.setReuseAddress(true);server.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"),port),1);server.setSoTimeout(1000);}
-        logFields("transport_controller_ready","transport",transportMode,"endpoint",nativeUsb?AndroidAccessoryIo.PATH:"127.0.0.1:"+port,"controller_deadline_uptime_ms",seconds==0?null:deadline,"persistent_controller",seconds==0,"audio_supported",false,"auth_provider_available",false,"wire","CarLife 8-byte channel/length then unchanged message header");
+        logFields("transport_controller_ready","transport",transportMode,"endpoint",nativeUsb?AndroidAccessoryIo.PATH:"127.0.0.1:"+port,"controller_deadline_uptime_ms",seconds==0?null:deadline,"persistent_controller",seconds==0,"audio_source_requested",audioSource,"audio_capture_verified",false,"auth_provider_available",false,"wire","CarLife 8-byte channel/length then unchanged message header");
         Thread watchdog=new Thread(new Runnable(){public void run(){
             while(running){
                 if(SystemClock.uptimeMillis()>deadline){log("deadline","server time limit");shutdown();break;}
@@ -209,6 +211,14 @@ public final class MdMain {
         final long sessionId=++sessionSequence;
         final MdTransport transport; final DataInputStream in;final OutputStream out;
         final ArrayBlockingQueue<Packet> controls=new ArrayBlockingQueue<Packet>(32),videos=new ArrayBlockingQueue<Packet>(8);
+        final Object writerSignal=new Object();
+        final PcmAudioSession audio;
+        final boolean audioRequested=audioSource.equals("remote-submix");
+        boolean audioNegotiated,audioAttempted;
+        volatile boolean audioHuMuted,audioBluetooth;
+        volatile boolean audioWireActive;
+        static final class MusicStatus {final long epoch;final boolean active;MusicStatus(long e,boolean a){epoch=e;active=a;}}
+        volatile MusicStatus pendingMusicStatus;
         volatile boolean open=true,everNegotiated,closeComplete;volatile String terminalReason;volatile long writingSince;volatile long videoGeneration=0;volatile Process capture;
         volatile MediaCodecDisplaySource mediaSource;
         volatile Packet writingPacket;
@@ -223,10 +233,18 @@ public final class MdMain {
         final InputSink sink;
         Session(Socket s)throws IOException{this(new SocketMdTransport(s));}
         Session(MdTransport t)throws IOException{this(t,new InputSink());}
-        Session(MdTransport t,InputSink input)throws IOException{transport=t;in=new DataInputStream(t.input());out=t.output();sink=input;sink.configureNativeTouch(t.isNativeUsb());}
+        Session(MdTransport t,InputSink input)throws IOException{this(t,input,new PcmAudioSession.Factory(){public PcmAudioSession.Source create(){return new RemoteSubmixSource();}});}
+        Session(MdTransport t,InputSink input,PcmAudioSession.Factory audioFactory)throws IOException{
+            transport=t;in=new DataInputStream(t.input());out=t.output();sink=input;sink.configureNativeTouch(t.isNativeUsb());
+            audio=new PcmAudioSession(audioFactory,new PcmAudioSession.Events(){
+                public long now(){return SystemClock.uptimeMillis();}
+                public void wakeWriter(){wake();}
+                public void state(String state,String detail){logFields("audio_source","session_id",sessionId,"state",state,"detail",detail,"source",audioSource);}
+            });
+        }
         String wireMarker(){return transport.isNativeUsb()?(videoSource.equals("mediacodec")?"DIRECT_USB_AOA;source=MediaCodecDisplaySource;video=ANNEXB_AU;timestamp=ENCODER_PTS_MS":"DIRECT_USB_AOA"):(videoSource.equals("mediacodec")?MediaCodecDisplaySource.WIRE_MARKER:"DEV_STREAM_OVER_ADB");}
         void run()throws IOException {
-            logFields("connected","session_id",sessionId,"transport",transport.name(),"audio_mic_auth_encryption","unsupported","wire_marker",wireMarker());
+            logFields("connected","session_id",sessionId,"transport",transport.name(),"audio_source_requested",audioSource,"mic_auth_encryption","unsupported","wire_marker",wireMarker());
             writer=new Thread(new Runnable(){public void run(){writeLoop();}},"md-writer");writer.start();
             if(bootReadiness!=null)bootReadiness.commandReady(true);
             CarLifeFrameReader nativeReader=transport.isNativeUsb()?new CarLifeFrameReader(in,new CarLifeFrameReader.Diagnostics(){public void accept(CarLifeFrameReader.Header h){
@@ -243,9 +261,10 @@ public final class MdMain {
         }
         boolean nativeCompatibility(){return transport.isNativeUsb()&&huMajor>=2;}
         void nativeProgress()throws IOException {
+            maybeStartAudio();
             if(!nativeCompatibility()||!version||!open)return;
             long now=SystemClock.uptimeMillis();
-            if(!moduleStatusSent&&moduleStatusDue>0&&now>=moduleStatusDue){send(CMD,0x10026,NativeSessionProtocol.idleModules());moduleStatusSent=true;}
+            if(!moduleStatusSent&&moduleStatusDue>0&&now>=moduleStatusDue){send(CMD,0x10026,NativeSessionProtocol.idleModules());if(audioWireActive)musicStatusReply();moduleStatusSent=true;}
             // Some v2 HUs omit START (HeadSwap's observed VW flow). Read-loop ownership
             // plus the generation/RESET cancellation prevents a second concurrent source.
             maybeSendNativePauseHeartbeat(now);
@@ -270,11 +289,57 @@ public final class MdMain {
             if(pendingInit!=null){log("native_init_repeat","retain original pending capability probe; no premature ACK");return true;}
             return false;
         }
-        void writeLoop(){try{while(open){Packet p=controls.poll();boolean video=false;if(p==null){p=videos.poll(50,TimeUnit.MILLISECONDS);video=true;}if(p==null)continue;
+        void wake(){synchronized(writerSignal){writerSignal.notifyAll();}}
+        synchronized void maybeStartAudio(){
+            if(!open||!version||!audioRequested||!audioNegotiated||audioHuMuted||audioBluetooth||audioAttempted||!audio.retired())return;
+            audioAttempted=true;audio.start();
+        }
+        void resetAudio(){audio.stop();synchronized(audio.queue){audio.queue.clear();audioWireActive=false;pendingMusicStatus=null;}audioNegotiated=false;audioAttempted=false;audioHuMuted=false;audioBluetooth=false;}
+        void musicStatusReply(){synchronized(audio.queue){pendingMusicStatus=new MusicStatus(audio.queue.epoch(),audioWireActive&&!audioHuMuted&&!audioBluetooth);}wake();}
+        void audioWritten(CarLifeAudio.Item sound){
+            synchronized(audio.queue){if(!audio.queue.current(sound))return;
+                audio.queue.wrote();if(sound.id!=CarLifeAudio.INIT&&sound.id!=CarLifeAudio.STOP)return;
+                audioWireActive=sound.id==CarLifeAudio.INIT;
+                pendingMusicStatus=new MusicStatus(sound.epoch,audioWireActive&&!audioHuMuted&&!audioBluetooth);
+            }
+            logFields("audio_wire_state","session_id",sessionId,"active",sound.id==CarLifeAudio.INIT,"message_id",sound.id,"pcm_format","48000/stereo/s16le");
+        }
+        void audioModuleControl(Map<Integer,Object> fields)throws IOException{
+            Proto.requireInts(fields,1,2);int module=Proto.number(fields,1,-1),status=Proto.number(fields,2,-1);
+            if(module!=3||!(status==0||status==1)){log("audio_module_control","unsupported module/status "+module+"/"+status);return;}
+            audioHuMuted=status==0;if(audioHuMuted)audio.stop();else{audioAttempted=false;maybeStartAudio();}
+            musicStatusReply();
+            logFields("audio_module_control","session_id",sessionId,"music_requested",status==1,"source_enabled",audioRequested,"bluetooth_audio_selected",audioBluetooth);
+        }
+        void audioFeatureConfig(byte[] payload){
+            try{Integer mode=CarLifeAudio.transmissionMode(payload);if(mode==null)return;
+                if(mode!=0&&mode!=1){logFields("audio_transport_unknown","session_id",sessionId,"mode",mode);return;}
+                boolean wasBluetooth=audioBluetooth;audioBluetooth=mode==1;
+                if(audioBluetooth)audio.stop();else if(wasBluetooth){audioAttempted=false;maybeStartAudio();}
+                musicStatusReply();
+                logFields("audio_transport_selected","session_id",sessionId,"mode",audioBluetooth?"bluetooth_no_usb_pcm":"usb_pcm","source_enabled",audioRequested);
+            }catch(IOException e){logFields("audio_feature_error","session_id",sessionId,"error",e.toString());}
+        }
+        void writeLoop(){boolean preferAudio=true;try{while(open){
+            Packet p=controls.poll();boolean video=false;CarLifeAudio.Item sound=null;
+            MusicStatus music=null;
+            if(p==null){synchronized(audio.queue){music=pendingMusicStatus;pendingMusicStatus=null;}
+                if(music!=null){if(music.epoch!=audio.queue.epoch())continue;p=new Packet(packet(CMD,0x10026,CarLifeAudio.musicStatus(music.active),0),-1);}}
+            if(p==null){
+                if(preferAudio)sound=audio.queue.poll(SystemClock.uptimeMillis());
+                if(sound==null){p=videos.poll();video=p!=null;}
+                if(p==null&&sound==null)sound=audio.queue.poll(SystemClock.uptimeMillis());
+                if(sound!=null){if(!audio.queue.current(sound))continue;p=new Packet(packet(CarLifeAudio.MEDIA,sound.id,sound.payload,sound.timestamp),-1);preferAudio=false;}
+                else if(video)preferAudio=true;
+            }
+            if(p==null){synchronized(writerSignal){if(open&&controls.isEmpty()&&videos.isEmpty()&&audio.queue.size()==0&&pendingMusicStatus==null)writerSignal.wait(50);}continue;}
+            if(sound!=null&&!audio.queue.current(sound))continue;
+            if(music!=null&&music.epoch!=audio.queue.epoch())continue;
             if(video&&!sameVideoGeneration(p.videoGeneration,videoGeneration)){staleVideoWriteDrops.incrementAndGet();log("video_epoch_drop","discard stale source generation before write");continue;}
             if(video&&SystemClock.uptimeMillis()-p.queued>2000)throw new IOException("video queue latency >2s; reconnect for IDR");
             writingPacket=p;writingSince=SystemClock.uptimeMillis();transport.writePacket(p.data);
             long ended=SystemClock.uptimeMillis();lastSocketWriteDurationMs=ended-writingSince;lastSocketWriteUptime=ended;socketWrittenPackets++;socketWrittenBytes+=p.data.length;if(video)socketWrittenVideoPackets++;writingSince=0;writingPacket=null;
+            if(sound!=null)audioWritten(sound);
         }}catch(Exception e){if(open)logFields("write_error","session_id",sessionId,"logical_session",nativeLogicalSession,"ever_negotiated",everNegotiated,"error",e.toString());close("write_error");}}
         void maybeReportProgress(){long now=SystemClock.uptimeMillis();if(now-lastSnapshotUptime>=PipelineProgress.PERIOD_MS){lastSnapshotUptime=now;reportProgress("periodic",mediaSource);}}
         void reportProgress(String reason,MediaCodecDisplaySource source){
@@ -288,6 +353,7 @@ public final class MdMain {
                 "socket_inflight_started_uptime_ms",PipelineProgress.seen(writeStarted),"socket_inflight_age_ms",PipelineProgress.age(now,writeStarted),"socket_inflight_wire_bytes",inFlight==null?0:inFlight.data.length,"socket_inflight_generation",inFlight==null?null:inFlight.videoGeneration,"stale_enqueue_drops",staleVideoEnqueueDrops.get(),"stale_write_drops",staleVideoWriteDrops.get(),
                 "video_queue_capacity",8,"control_queue_capacity",32,"video_queue_age_budget_ms",2000,"socket_write_stall_budget_ms",3000);
             appendAccessoryProgress(f);
+            audio.queue.appendProgress(f);Collections.addAll(f,"audio_source_active",audio.active(),"audio_wire_active",audioWireActive,"audio_source_error",audio.error());
             if(source!=null)source.appendProgress(f,now);
             logFields("md_progress",f.toArray(new Object[0]));
         }
@@ -312,6 +378,7 @@ public final class MdMain {
             if(ch==VIDEO&&!sameVideoGeneration(generation,videoGeneration)){staleVideoEnqueueDrops.incrementAndGet();log("video_epoch_drop","discard stale source generation before enqueue");return;}
             Packet p=new Packet(packet(ch,id,data,timestamp),generation);
             if(!(ch==VIDEO?videos:controls).offer(p,1000,TimeUnit.MILLISECONDS))throw new IOException("bounded send queue exhausted");
+            wake();
             long enqueuedAt=SystemClock.uptimeMillis();
             if(ch==VIDEO){lastVideoEnqueueUptime=enqueuedAt;videoEnqueuedPackets.incrementAndGet();videoEnqueuedBytes.addAndGet(p.data.length);}else{lastControlEnqueueUptime=enqueuedAt;controlEnqueuedPackets.incrementAndGet();controlEnqueuedBytes.addAndGet(p.data.length);}
             if(ch!=VIDEO)log("tx","channel="+ch+" id=0x"+Integer.toHexString(id)+" bytes="+data.length);
@@ -342,7 +409,7 @@ public final class MdMain {
                         // Closing a host libusb claim is not a physical device detach. A fresh
                         // genuine HU_VERSION after PAUSE starts negotiation on the same fd.
                         // One writer preserves old in-flight VIDEO -> VERSION_MATCH ordering.
-                        stopCapture();sink.cancel();controls.clear();videos.clear();
+                        stopCapture();resetAudio();sink.cancel();controls.clear();videos.clear();
                         version=false;initialized=false;paused=false;codecSelection=null;geometry=null;nativeLogicalSession++;
                         logFields("native_session_boundary","session_id",sessionId,"logical_session",nativeLogicalSession,"generation",videoGeneration,"reason","fresh HU_VERSION after source-stopped VIDEO_PAUSE");
                     }
@@ -354,6 +421,9 @@ public final class MdMain {
                     if(!version)log("version_rejected","invalid version or unsupported development profile");return;
                 }
                 if(!version)throw new IOException("version required");
+                if(id==0x18028){audioModuleControl(fields);return;}
+                if(id==0x1800e){audioHuMuted=true;audio.stop();musicStatusReply();log("audio_pause_media","HU paused USB PCM; Android player control is not implemented");return;}
+                if(id==0x18052){audioFeatureConfig(p);log("native_optional_info","feature config received");return;}
                 if(id==0x18003){if(nativeCompatibility()){log("hu_info","received; MD_INFO already sent with VERSION");return;}send(CMD,0x10004,Proto.strings(1,"Android",7,"hulab-md",14,"CarLife MD video/input pilot",15,wireMarker()));return;}
                 if(nativeCompatibility()&&id==0x18027){if(!statisticReplied){
                     // MD accepts the HU without a challenge of its own. This is not an
@@ -388,18 +458,23 @@ public final class MdMain {
             if(!transport.isNativeUsb())++touchCount;
             if(!version||!initialized)throw new IOException("touch requires initialized session");
             if(!transport.isNativeUsb()&&touchCount>200000)throw new IOException("input count limit");
-            if(id==0x68001||id==0x6800e){sink.wire(id,p,fields,geometry,videoGeneration,this);return;}
+            if(id==0x68001||id==0x6800e||(transport.isNativeUsb()&&TouchFrame.isLegacyStream(id))){sink.wire(id,p,fields,geometry,videoGeneration,this);return;}
             if(id==0x68008){Proto.requireInts(fields,1);int key=Proto.number(fields,1,-1);if(androidKeyCodeForCarLife(key)>=0)sink.hardkey(key);else log("unsupported","hardkey="+key);return;}
             if(transport.isNativeUsb()){if(unknownTouchDiagnosticSamples<8){unknownTouchDiagnosticSamples++;logFields("native_touch_unknown","session_id",sessionId,"sample",unknownTouchDiagnosticSamples,"limit",8,"message_id",id,"payload_length",p.length);}}else log("unsupported","touchid0x"+Integer.toHexString(id));
         }
         static String touchHex(byte[] p){return hexPrefix(p,64);}
         static String hexPrefix(byte[] p,int cap){StringBuilder b=new StringBuilder();final char[] h="0123456789abcdef".toCharArray();for(int i=0;i<Math.min(p.length,cap);i++){if(i>0)b.append(' ');b.append(h[(p[i]&255)>>>4]).append(h[p[i]&15]);}return b.toString();}
-        static int rawTouchAction(int id,byte[] p,Map<Integer,Object> fields){return id==0x6800e?(p.length<4?-1:((p[0]&255)<<24)|((p[1]&255)<<16)|((p[2]&255)<<8)|(p[3]&255)):Proto.number(fields,1,-1);}
+        static int rawTouchAction(int id,byte[] p,Map<Integer,Object> fields){
+            if(id==0x6800e)return p.length<4?-1:((p[0]&255)<<24)|((p[1]&255)<<16)|((p[2]&255)<<8)|(p[3]&255);
+            if(TouchFrame.isLegacyStream(id))try{return TouchFrame.legacyStreamAction(id,fields);}catch(IOException invalid){return -1;}
+            return Proto.number(fields,1,-1);
+        }
         static String touchFields(Map<Integer,Object> fields){StringBuilder b=new StringBuilder();for(int k=1;k<=5;k++){if(k>1)b.append(',');b.append(k).append('=');Object v=fields.get(k);b.append(v==null?"absent":v instanceof Long?v:"wrong_type");}return b.toString();}
         void recordTouchIngress(int id,byte[] p,Map<Integer,Object> fields){
-            if(id!=0x68001&&id!=0x6800e)return;
+            if(!TouchFrame.isLegacyStream(id)&&id!=0x6800e)return;
             int action=rawTouchAction(id,p,fields),n=id==0x6800e&&p.length>=4?(p.length-4)/5:0;
-            int shape=(id==0x6800e?4:0)|(fields.containsKey(4)?1:0)|(fields.containsKey(5)?2:0);
+            int second=id==0x68001?4:3;
+            int shape=(id==0x6800e?4:id==0x68001?0:8)|(fields.containsKey(second)?1:0)|(fields.containsKey(second+1)?2:0);
             boolean priority=(action&255)==5||(action&255)==6||n>1||(lastTouchShape>=0&&lastTouchShape!=shape);lastTouchShape=shape;
             boolean retainHeader=priority?touchPriorityIngress<24:touchOrdinaryIngress<8;
             if(retainHeader){if(priority)touchPriorityIngress++;else touchOrdinaryIngress++;}
@@ -426,6 +501,7 @@ public final class MdMain {
             logFields("video_initialized","session_id",sessionId,"generation",videoGeneration,"boot_native",true,"width",width,"height",height,"fps",ticket.fps,"initialization","display and encoder capabilities validated; source resources begin on VIDEO_START");
         }
         synchronized void startCapture()throws IOException{
+            audioNegotiated=true;maybeStartAudio();
             final long generation=++videoGeneration;
             if(videoSource.equals("mediacodec")){if(codecSelection==null)throw new IOException("MediaCodec plan missing");MediaCodecDisplaySource source=new MediaCodecDisplaySource(this,codecSelection,generation);CAPTURE_LEASE.acquire(source,"mediacodec session="+sessionId+" generation="+generation);mediaSource=source;try{source.start();}catch(RuntimeException e){mediaSource=null;CAPTURE_LEASE.release(source,true);throw new IOException("source thread did not start",e);}return;}
             final Object leaseOwner=new Object();CAPTURE_LEASE.acquire(leaseOwner,"bootstrap session="+sessionId+" generation="+generation);
@@ -441,20 +517,20 @@ public final class MdMain {
             long end=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(timeoutMs);
             while(true){
                 Thread w=writer;
-                if(closeComplete&&(w==null||!w.isAlive())&&capture==null&&captureThread==null&&mediaSource==null&&!CAPTURE_LEASE.isHeld())return true;
+                if(closeComplete&&(w==null||!w.isAlive())&&capture==null&&captureThread==null&&mediaSource==null&&!CAPTURE_LEASE.isHeld()&&audio.retired())return true;
                 if(System.nanoTime()>=end)return false;
                 try{Thread.sleep(10);}catch(InterruptedException e){Thread.currentThread().interrupt();return false;}
             }
         }
         void close(){close("session_close");}
-        void close(String reason){synchronized(this){if(!open)return;noteTerminal(reason);open=false;}try{try{transport.close();}catch(IOException e){log("transport_close_error",e.toString());}stopCapture();sink.cancel();controls.clear();videos.clear();if(writer!=null&&writer!=Thread.currentThread())writer.interrupt();reportProgress("session_closed",mediaSource);logFields("session_closed","session_id",sessionId,"logical_session",nativeLogicalSession,"ever_negotiated",everNegotiated,"terminal_reason",terminalReason,"bytes",bytes,"chunks",chunks,"touches",touchCount);}finally{closeComplete=true;}}
+        void close(String reason){synchronized(this){if(!open)return;noteTerminal(reason);open=false;}audio.stop();audio.queue.clear();wake();try{try{transport.close();}catch(IOException e){log("transport_close_error",e.toString());}stopCapture();sink.cancel();controls.clear();videos.clear();if(writer!=null&&writer!=Thread.currentThread())writer.interrupt();reportProgress("session_closed",mediaSource);logFields("session_closed","session_id",sessionId,"logical_session",nativeLogicalSession,"ever_negotiated",everNegotiated,"terminal_reason",terminalReason,"bytes",bytes,"chunks",chunks,"touches",touchCount);}finally{closeComplete=true;}}
     }
     static boolean terminateChild(Process child){
         child.destroy();try{if(child.waitFor(2000,TimeUnit.MILLISECONDS))return true;child.destroyForcibly();return child.waitFor(2000,TimeUnit.MILLISECONDS);}catch(InterruptedException e){Thread.currentThread().interrupt();return !child.isAlive();}
     }
     static class InputSink {
         static final int ASYNC=0,WAIT_FOR_FINISH=2;
-        Object manager;Method inject,setDisplay;final TouchFrame.State state=new TouchFrame.State();boolean ignoreUntilDown;TouchFrame lastAttempt;
+        Object manager;Method inject,setDisplay;final TouchFrame.State state=new TouchFrame.State();final TouchFrame.State rawState=new TouchFrame.State();boolean ignoreUntilDown;TouchFrame lastAttempt;
         int touchInjectionMode=WAIT_FOR_FINISH;long nativeIngressUptime,nativeInputCount;
         InputSink(){if(!bootNative)initialize();}
         synchronized void configureNativeTouch(boolean nativeUsb){touchInjectionMode=nativeUsb?ASYNC:WAIT_FOR_FINISH;}
@@ -464,12 +540,13 @@ public final class MdMain {
         boolean event(InputEvent e,int display,int mode){if(bootNative&&inject==null)initialize();if(inject==null){log("input_unavailable","no reflection injector; no shell fallback");return false;}try{if(setDisplay!=null)setDisplay.invoke(e,display);else if(display!=0)throw new IOException("no explicit display routing API");boolean ok=(Boolean)inject.invoke(manager,e,mode);log("input_injected","accepted="+ok+" type="+e.getClass().getSimpleName()+" display="+display+" injection_mode="+mode+" acceptance="+(mode==ASYNC?"asynchronous_admission_not_app_handled":"wait_for_finish_result"));return ok;}catch(Exception ex){log("input_error",MediaCodecDisplaySource.cause(ex).toString());return false;}}
         synchronized void wire(int id,byte[] raw,Map<Integer,Object> fields,ProjectionGeometry geometry,long generation,Session owner)throws IOException{
             if(owner.transport.isNativeUsb()){nativeIngressUptime=owner.nativeTouchIngressUptime;nativeInputCount=owner.touchCount;}
-            boolean multi=id==0x6800e,dual=false;int action;
+            boolean multi=id==0x6800e,dual=false,compatibleLegacy=owner.transport.isNativeUsb()&&touchProfile.equals("recognized")&&TouchFrame.isLegacyStream(id);int action;
             TouchFrame frame=null;
             if(multi){if(!touchProfile.equals("action3-multi")&&!touchProfile.equals("all-lab")&&!touchProfile.equals("recognized"))throw new IOException("ACTION3 not enabled by explicit profile");frame=TouchFrame.action3(raw,sourceDisplayId,generation,SystemClock.uptimeMillis());action=frame.action;}
-            else {if(touchProfile.equals("action3-multi"))throw new IOException("legacy opcode not enabled by explicit profile");Proto.requireInts(fields,1,2,3);action=Proto.number(fields,1,-1)&255;dual=touchProfile.equals("legacy-dual")||((touchProfile.equals("all-lab")||touchProfile.equals("recognized"))&&fields.containsKey(4)&&fields.containsKey(5));if(touchProfile.equals("legacy-single")&&(fields.containsKey(4)||fields.containsKey(5)))throw new IOException("dual fields outside explicit single profile");if(touchProfile.equals("recognized")&&fields.containsKey(4)!=fields.containsKey(5))throw new IOException("incomplete recognized dual touch coordinate pair");}
+            else if(compatibleLegacy)action=TouchFrame.legacyStreamAction(id,fields)&255;
+            else {if(id!=0x68001||touchProfile.equals("action3-multi"))throw new IOException("legacy opcode not enabled by explicit profile");Proto.requireInts(fields,1,2,3);action=Proto.number(fields,1,-1)&255;dual=touchProfile.equals("legacy-dual")||((touchProfile.equals("all-lab")||touchProfile.equals("recognized"))&&fields.containsKey(4)&&fields.containsKey(5));if(touchProfile.equals("legacy-single")&&(fields.containsKey(4)||fields.containsKey(5)))throw new IOException("dual fields outside explicit single profile");if(touchProfile.equals("recognized")&&fields.containsKey(4)!=fields.containsKey(5))throw new IOException("incomplete recognized dual touch coordinate pair");}
             if(ignoreUntilDown&&action!=0){log("touch_ignored","gesture canceled; waiting new DOWN");return;}if(action==0)ignoreUntilDown=false;
-            if(frame==null)frame=TouchFrame.legacy(fields,dual,state,sourceDisplayId,generation,SystemClock.uptimeMillis());
+            if(frame==null)frame=compatibleLegacy?TouchFrame.legacyCompatible(id,fields,rawState,sourceDisplayId,generation,SystemClock.uptimeMillis()):TouchFrame.legacy(fields,dual,state,sourceDisplayId,generation,SystemClock.uptimeMillis());
             if(state.last!=null&&!(owner.transport.isNativeUsb()?TouchFrame.sameWireFamily(state.last.source,frame.source):state.last.source.equals(frame.source)))throw new IOException("touch wire profile changed during gesture");
             TouchFrame mapped=frame.mapped(geometry);owner.recordTouchMapping(id,frame,mapped,geometry);if(mapped==null){cancel();ignoreUntilDown=true;logFields("touch_outside_viewport","action",action,"policy","reject outside DOWN; CANCEL active gesture; ignore until fresh DOWN","geometry",geometry.toString());return;}
             if(owner.transport.isNativeUsb()&&mapped.action==0&&state.last!=null){
@@ -477,6 +554,7 @@ public final class MdMain {
                 cancel();state.clear();owner.recordTouchRecovery(id,raw,fields,"restarted_down","fresh DOWN cancels previous contact before starting new gesture");
             }
             apply(mapped,owner.transport.isNativeUsb());
+            if(compatibleLegacy)rawState.accept(frame);
         }
         synchronized void apply(TouchFrame f)throws IOException{apply(f,false);}
         synchronized void apply(TouchFrame f,boolean nativeInput)throws IOException{
@@ -492,14 +570,14 @@ public final class MdMain {
             for(int i=0;i<n;i++){pp[i]=new MotionEvent.PointerProperties();pp[i].id=f.ids[i];pp[i].toolType=MotionEvent.TOOL_TYPE_FINGER;pc[i]=new MotionEvent.PointerCoords();pc[i].x=f.xs[i];pc[i].y=f.ys[i];pc[i].pressure=f.action==1||f.action==3?0:1;pc[i].size=1;}
             MotionEvent e=MotionEvent.obtain(state.downTime,f.timeMs,f.fullAction(),n,pp,pc,0,0,1,1,0,0,0x1002,0);try{return event(e,f.displayId,mode);}finally{e.recycle();}
         }
-        synchronized void cancel(){try{TouchFrame f=state.cancel(SystemClock.uptimeMillis());if(f!=null){state.accept(f);boolean ok=injectTouchFrame(f);logFields("touch_cancel","pointer_count",f.ids.length,"ids",Arrays.toString(f.ids),"display_id",f.displayId,"generation",f.generation,"accepted",ok,"injection_mode",touchInjectionMode,"acceptance_semantics",touchInjectionMode==ASYNC?"asynchronous_admission_only; app_handling_not_confirmed":"wait_for_finish_result");}}catch(Exception e){log("input_cancel_error",e.toString());}}
+        synchronized void cancel(){try{TouchFrame f=state.cancel(SystemClock.uptimeMillis());if(f!=null){state.accept(f);boolean ok=injectTouchFrame(f);logFields("touch_cancel","pointer_count",f.ids.length,"ids",Arrays.toString(f.ids),"display_id",f.displayId,"generation",f.generation,"accepted",ok,"injection_mode",touchInjectionMode,"acceptance_semantics",touchInjectionMode==ASYNC?"asynchronous_admission_only; app_handling_not_confirmed":"wait_for_finish_result");}}catch(Exception e){log("input_cancel_error",e.toString());}finally{rawState.clear();}}
         synchronized void recoverNative(){
             // UP clears canonical state before Android answers. A rejected UP still
             // needs an explicit CANCEL using the attempted contact, not an empty state.
             TouchFrame attempted=lastAttempt;
             try{if(attempted!=null){TouchFrame c=new TouchFrame(3,attempted.ids,attempted.xs,attempted.ys,attempted.displayId,attempted.generation,SystemClock.uptimeMillis(),attempted.source);boolean ok=injectTouchFrame(c);logFields("touch_cancel","pointer_count",c.ids.length,"ids",Arrays.toString(c.ids),"display_id",c.displayId,"generation",c.generation,"accepted",ok,"reason","rejected attempted input","injection_mode",touchInjectionMode,"acceptance_semantics",touchInjectionMode==ASYNC?"asynchronous_admission_only; app_handling_not_confirmed":"wait_for_finish_result");}else if(state.last!=null)cancel();}
             catch(Exception e){log("input_cancel_error",e.toString());}
-            finally{state.clear();lastAttempt=null;ignoreUntilDown=true;}
+            finally{state.clear();rawState.clear();lastAttempt=null;ignoreUntilDown=true;}
         }
         synchronized void cancelIfIdle(){if(state.last!=null&&SystemClock.uptimeMillis()-state.last.timeMs>3000){log("touch_timeout","no input update for3s; CANCEL all pointers");cancel();ignoreUntilDown=true;}}
         synchronized void back(){hardkey(14);}

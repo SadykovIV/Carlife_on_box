@@ -6,7 +6,7 @@
 
 ## 1. Собрать MD
 
-Выполните [BUILD_MD](BUILD_MD.md). Результат — `build/md/md-boot-native.jar`. При JDK 17, API 35 и R8 8.3.37 воспроизводится рабочий SHA-256 `347c6ef1fdf0fa25d0c8ae4bd333c8cfce2ed6ed6d7c70cba9b6cbd1c55b87dd`.
+Выполните [BUILD_MD](BUILD_MD.md). Результат — `build/md/md-boot-native.jar`. Для исторического baseline commit `3b344d45ae34df215166385ba0c65f195652f5d8` при JDK17/API35/R8 8.3.37 воспроизводится SHA-256 `347c6ef1fdf0fa25d0c8ae4bd333c8cfce2ed6ed6d7c70cba9b6cbd1c55b87dd`.
 
 ## 2. Собрать observer, runtime и selector
 
@@ -30,6 +30,8 @@ python3 scripts/build_runtime.py \
 - `uevent-watch` и `BUILD.json`.
 
 Это компоненты, а не готовая прошивка. Selector daemon — локальная служба с привилегиями. `OemSelectorUi.java` содержит код интеграции: сборка DEX сама по себе не добавляет пункт в OEM Settings. Необязательный сборщик OEM-патча описан в [BUILD_MD](BUILD_MD.md).
+
+Для отдельного аудиокандидата используйте `--audio-source remote-submix` и отдельный `--runtime-version`: [инструкция](AUDIO_CANDIDATE.md). Эти параметры staging не делают новый resolver автоматически совместимым с адресной миграцией ниже.
 
 ## 3. Создать overlay точной эталонной прошивки
 

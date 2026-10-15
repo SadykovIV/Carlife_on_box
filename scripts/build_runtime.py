@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -16,7 +17,50 @@ ROOT = Path(__file__).resolve().parents[1]
 def sha(p):
     return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 
-def main():
+def runtime_version(value):
+    """One ASCII path component, also safe in the controller's unquoted shell anchors."""
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', value):
+        raise argparse.ArgumentTypeError('runtime version must be 1..64 ASCII letters, digits, dot, underscore or hyphen, starting with a letter or digit')
+    return value
+
+def replace_unique(text, old, new, label):
+    if text.count(old) != 1:
+        raise ValueError(label + ' must occur exactly once in staged source')
+    return text.replace(old, new, 1)
+
+def configure_controller_audio(text, audio_source):
+    """Change only the staged MD launch line; the identity matcher is left untouched."""
+    if audio_source not in ('off', 'remote-submix'):
+        raise ValueError('unsupported audio source')
+    if audio_source == 'off':
+        return text
+    launch = 'exec /system/bin/app_process /system/bin org.carlife.hulab.MdMain'
+    lines = text.splitlines(keepends=True)
+    candidates = [i for i, line in enumerate(lines) if launch in line]
+    if len(candidates) != 1:
+        raise ValueError('MD launch line must occur exactly once in staged controller')
+    i = candidates[0]
+    if lines[i].count(launch) != 1 or '--audio-source' in lines[i]:
+        raise ValueError('MD launch line has duplicate command or an existing audio option')
+    lines[i] = replace_unique(lines[i], '--transport native-usb',
+                              '--transport native-usb --audio-source remote-submix', 'native transport launch option')
+    return ''.join(lines)
+
+def configure_runtime_inputs(control, controller, audio_source, version, source_version):
+    """Prepare version-consistent staging files without changing source/baseline files."""
+    version = runtime_version(version)
+    source_version = runtime_version(source_version)
+    controller = configure_controller_audio(controller, audio_source)
+    if version != source_version:
+        control = replace_unique(control, 'V=$P/versions/' + source_version + '\n',
+                                 'V=$P/versions/' + version + '\n', 'resolver version path')
+        control = replace_unique(control, 'exact_lf "$P/current" ' + source_version + ' || exit 70',
+                                 'exact_lf "$P/current" ' + version + ' || exit 70', 'resolver current-version check')
+        controller = replace_unique(controller, '[ "$V" = "$P/versions/' + source_version + '" ]',
+                                    '[ "$V" = "$P/versions/' + version + '" ]', 'controller version check')
+    return control, controller
+
+def argument_parser(default_version):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--md-jar', type=Path, required=True)
     p.add_argument('--android-jar', type=Path, required=True)
@@ -25,11 +69,28 @@ def main():
     p.add_argument('--clang', default='clang')
     p.add_argument('--ld-lld', default='ld.lld')
     p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--audio-source', choices=('off', 'remote-submix'), default='off',
+                   help='MD audio source for this staged runtime; off preserves the baseline launch line')
+    p.add_argument('--runtime-version', type=runtime_version, default=default_version,
+                   help='Separate runtime version directory (default: %(default)s); never installs/selects it')
+    return p
+
+def main():
+    spec = importlib.util.spec_from_file_location('package_runtime', ROOT/'tools/boot_native/build_package.py')
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    p = argument_parser(mod.VERSION)
     a = p.parse_args()
     if a.output.exists():
         p.error('output must be a new directory')
     for path in (a.md_jar, a.android_jar, a.r8_jar):
         if not path.is_file(): p.error('missing input: ' + str(path))
+    try:
+        control, controller = configure_runtime_inputs(
+            (ROOT/'tools/boot_native/runtime/runtime-control.sh').read_bytes().decode('utf-8'),
+            (ROOT/'tools/boot_native/runtime/runtime-controller.sh').read_bytes().decode('utf-8'),
+            a.audio_source, a.runtime_version, mod.VERSION)
+    except ValueError as error:
+        p.error(str(error))
     java = str(a.java_home/'bin/java') if a.java_home else shutil.which('java')
     javac = str(a.java_home/'bin/javac') if a.java_home else shutil.which('javac')
     clang = shutil.which(a.clang)
@@ -44,15 +105,14 @@ def main():
          '-static', '-Wl,-e,_start', '-Wl,--build-id=none', '-Wl,-z,noexecstack',
          ROOT/'tools/boot_native/observer/uevent-watch.c', '-o', observer])
     # Reuse the original deterministic runtime packaging contract, with local build inputs.
-    spec = importlib.util.spec_from_file_location('package_runtime', ROOT/'tools/boot_native/build_package.py')
-    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
     stage = out/'runtime-inputs'; (stage/'runtime').mkdir(parents=True)
     (stage/'observer/build').mkdir(parents=True); (stage/'md/build').mkdir(parents=True)
-    for n in ('runtime-control.sh', 'runtime-controller.sh'):
-        shutil.copyfile(ROOT/'tools/boot_native/runtime'/n, stage/'runtime'/n)
+    (stage/'runtime/runtime-control.sh').write_bytes(control.encode('utf-8'))
+    (stage/'runtime/runtime-controller.sh').write_bytes(controller.encode('utf-8'))
     shutil.copyfile(observer, stage/'observer/build/uevent-watch')
     shutil.copyfile(a.md_jar, stage/'md/build/md-boot-native.jar')
     mod.HERE = stage
+    mod.VERSION = a.runtime_version
     runtime = mod.build(out/'runtime')
     selector = ROOT/'tools/boot_native/selector'
     release = out/'selector'; release.mkdir()
@@ -90,6 +150,7 @@ exec /system/bin/app_process /system/bin org.carlife.selector.SelectorDaemon @HE
     payload = {n:sha(release/n) for n in ('selector-daemon.sh','selector-daemon.jar','selector-control.sh')}
     (release/'manifest.json').write_text(json.dumps({'payload':payload, 'oem_apks_included':False},indent=2)+'\n')
     result = {'status':'SOURCE_BUILD_ONLY_NOT_DEVICE_TESTED','runtime_sha256':runtime['archive_sha256'],
+              'audio_source':a.audio_source,'runtime_version':a.runtime_version,
               'observer_sha256':sha(observer),'md_sha256':sha(a.md_jar),'selector':payload,
               'device_operations':0, 'requires_board_integration':True}
     (out/'BUILD.json').write_text(json.dumps(result, indent=2)+'\n')

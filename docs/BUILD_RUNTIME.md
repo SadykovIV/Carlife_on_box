@@ -6,7 +6,7 @@ This produces local build artifacts. It does not connect to a device, install fi
 
 ## 1. Build the MD
 
-Follow [BUILD_MD.md](BUILD_MD.md). The expected output is `build/md/md-boot-native.jar`. The reference JAR can be reproduced with JDK 17, API 35 and R8 8.3.37; it has SHA-256 `347c6ef1fdf0fa25d0c8ae4bd333c8cfce2ed6ed6d7c70cba9b6cbd1c55b87dd`.
+Follow [BUILD_MD.md](BUILD_MD.md). The expected output is `build/md/md-boot-native.jar`. The historical reference JAR at commit `3b344d45ae34df215166385ba0c65f195652f5d8` can be reproduced with JDK 17, API 35 and R8 8.3.37; it has SHA-256 `347c6ef1fdf0fa25d0c8ae4bd333c8cfce2ed6ed6d7c70cba9b6cbd1c55b87dd`.
 
 ## 2. Build the observer, runtime archive and selector
 
@@ -30,6 +30,8 @@ Use a new output directory. Outputs include:
 - `uevent-watch` and `BUILD.json`.
 
 These are components, not an installable firmware. The selector daemon is a privileged local endpoint. `OemSelectorUi.java` is the reference integration source; merely building its DEX does not add a row to an OEM Settings APK. The optional OEM patch builder is described in [BUILD_MD.md](BUILD_MD.md).
+
+For a separate audio candidate, use `--audio-source remote-submix` and a distinct `--runtime-version`; see [candidate instructions](AUDIO_CANDIDATE.md). These staging options do not make a custom resolver compatible with the pinned system migration below.
 
 ## 3. Generate the exact reference system overlay
 

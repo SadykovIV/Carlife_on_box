@@ -18,13 +18,14 @@ COMMON = ROOT / 'android-md'
 NATIVE = ROOT / 'tools/boot_native/md'
 TESTS = [
     'MdWireTest', 'MdWriterRaceTest', 'MdWatchdogRaceTest', 'DrainUntilStoppedTest',
-    'PipelineProgressTest', 'AvcAccessUnitsTest', 'SourceLeaseTest', 'ProjectionTouchTest',
+    'PipelineProgressTest', 'AvcAccessUnitsTest', 'SourceLeaseTest', 'ProjectionTouchTest', 'LegacyMultitouchTest',
     'OemCsdGuardTest', 'AccessoryTransportTest', 'NativeSessionBoundaryTest', 'AsyncRingLogTest',
     'BootPendingInitTest', 'CarLifeFrameReaderTest', 'NativeCompatibilityTest',
     'AccessoryPacketWriteTest', 'NativePauseHeartbeatTest', 'AccessoryProgressDiagnosticsTest',
-    'NativeOwnerRetirementTest', 'NativeTouchRecoveryTest', 'NativeFeatureResponseDiagnosticsTest',
+    'NativeOwnerRetirementTest', 'NativeTouchRecoveryTest', 'NativeLegacyMultitouchTest', 'NativeFeatureResponseDiagnosticsTest',
     'NativeTouchWireDiagnosticsTest', 'NativeAsyncTouchInjectionTest', 'NativeEncoderPriorityTest',
     'VideoDiagnosticPolicyTest', 'NativeVideoDiagnosticsEntryTest',
+    'CarLifeAudioTest', 'PcmAudioSessionTest', 'NativeAudioSessionTest',
 ]
 
 

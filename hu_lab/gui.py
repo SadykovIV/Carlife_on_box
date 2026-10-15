@@ -71,7 +71,7 @@ def run_gui(host, port, output_dir, duration=60, width=1280, height=720, fps=30,
             source_size=None, source_policy="fit", allow_mode_fallback=False, on_decoded_frame=None,
             on_painted_frame=None, on_tick=None, on_action=None, scripted_only=False,
             transport_factory=None, backend="DEV_STREAM_OVER_ADB", on_live_actions=None,
-            actions_after_streaming=False):
+            actions_after_streaming=False, audio_capture=False, audio_capture_limit_mib=8):
     from PySide6.QtCore import Qt, QRectF, QTimer, QEventLoop
     from PySide6.QtGui import QColor, QImage, QPainter, QTransform
     from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QPushButton, QHBoxLayout, QVBoxLayout, QWidget
@@ -87,7 +87,8 @@ def run_gui(host, port, output_dir, duration=60, width=1280, height=720, fps=30,
                    capture_limit_mib=capture_limit_mib, trace_mode=trace_mode,
                    display_policy=display_policy, rotation=rotation, source_size=source_size,
                    source_policy=source_policy, allow_mode_fallback=allow_mode_fallback,
-                   on_decoded_frame=on_decoded_frame, transport_factory=transport_factory, backend=backend)
+                   on_decoded_frame=on_decoded_frame, transport_factory=transport_factory, backend=backend,
+                   audio_capture=audio_capture, audio_capture_limit_mib=audio_capture_limit_mib)
     client = HUClient(host, port, output_dir, **options)
     reconnect_count = 0
     session_history = []
