@@ -1,0 +1,35 @@
+CarLife on Android Box — Magisk runtime update
+
+For an existing native CarLife installation on TBox Ultra 1 / SM6350 / Android 15.
+This candidate adds separate MEDIA/TTS, media metadata, Yandex notification
+maneuvers, speech recognition and bounded video queues. Hardware acceptance is
+pending: audible routing and recognizer support must be checked on the box.
+The selected video mode remains 720p.
+
+1. Copy the ZIP named "update" to the box.
+2. Magisk → Modules → Install from storage → select the ZIP.
+3. Wait for "Staged" / successful installation, then tap Reboot.
+   Installation keeps the current CarLife session running. On the next boot,
+   the module stops the old runtime, applies the files and requests the existing
+   init service to start CarLife. One image reconnection may occur.
+4. Magisk → CarLife runtime update → Action shows the application result.
+   Check music, a Yandex voice prompt, Home/Back and video.
+
+The package leaves boot, system APKs, ADB settings, USB configuration and the
+saved AA/CarPlay/CarLife selection intact. It requires no new boot patch or
+initial installation. Subsequent boots use the existing early init path;
+service.sh only applies an outstanding update transaction.
+
+To revert, install the ZIP named "rollback" and reboot once. It restores the
+runtime saved BEFORE THE FIRST update with this installer, retaining boot and
+the current mode selection. Backup and logs remain in
+/data/adb/carlife-runtime-update/. This reverts the update, not CarLife itself.
+Disabling/removing the delivery module does not undo already applied files.
+
+If staging/application reports an error, retain its log and Action output.
+An incompatible installation is not converted into a new firmware install.
+Keep stable power during application; use the proven separate Honda bench
+power supply where appropriate.
+
+This ZIP does not provision a clean box. Initial installation uses the separate
+universal installer for a compatible firmware.

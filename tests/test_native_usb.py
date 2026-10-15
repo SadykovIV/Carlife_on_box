@@ -11,9 +11,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from hu_lab.client import HUClient
+from hu_lab.audio import MEDIA_INIT, MEDIA_DATA
 from hu_lab.native_usb import ScopedUSBAdmission, NativeUSBTransportFactory, USBStream
-from hu_lab.protocol import (Packet, FrameParser, CMD, TOUCH, VIDEO, VIDEO_DATA, VIDEO_HEARTBEAT, HU_VERSION, VERSION_MATCH,
-    MD_INFO, VIDEO_INIT, VIDEO_INIT_DONE, VIDEO_START, VIDEO_PAUSE, VIDEO_RESET,
+from hu_lab.protocol import (Packet, FrameParser, CMD, TOUCH, VIDEO, MEDIA, VIDEO_DATA, VIDEO_HEARTBEAT, HU_VERSION, VERSION_MATCH,
+    MD_INFO, VIDEO_INIT, VIDEO_INIT_DONE, VIDEO_START, VIDEO_PAUSE, VIDEO_RESET, PAUSE_MEDIA,
     HARD_KEY, HOME_KEY, BACK_KEY, protobuf, fields, NATIVE_MEDIACODEC_AU_MARKER,
     MEDIACODEC_AU_MARKER, ProtocolError)
 from hu_lab.usb import USBIdentity, USBHandle, RecoveryBlocked, BulkPair, write_all, USBError
@@ -346,6 +347,92 @@ class NativeUSBTests(unittest.TestCase):
         self.assertGreaterEqual(client.native_shutdown_drain["elapsed_seconds"], .2)
         self.assertLess(client.native_shutdown_drain["elapsed_seconds"], 3.5)
         self.assertFalse(client.summary()["workers_alive"])
+
+    def test_native_stop_pauses_live_media_before_video_and_drains_final_packet(self):
+        # VIDEO_PAUSE alone does not stop PCM. Model an MD that keeps sending
+        # valid audio until PAUSE_MEDIA, including a fragmented final packet.
+        for already_paused in (False, True):
+            with self.subTest(already_paused=already_paused):
+                class Handle:
+                    def __init__(self):
+                        self.cancel = threading.Event()
+                        self.audio_active = threading.Event()
+                        self.parser = FrameParser()
+                        self.incoming = queue.Queue()
+                        self.sent = []
+                        self.audio_packets = 0
+
+                    def read(self, capacity, timeout):
+                        try:
+                            return self.incoming.get(timeout=min(timeout, .01))
+                        except queue.Empty:
+                            if self.cancel.is_set():
+                                raise InterruptedError("cancel")
+                            if self.audio_active.is_set():
+                                self.audio_packets += 1
+                                return Packet(MEDIA, MEDIA_DATA, b"\x01\x00" * 960,
+                                              self.audio_packets * 10).encode()
+                            raise TimeoutError("idle USB")
+
+                    def write(self, data, timeout):
+                        for packet in self.parser.feed(data):
+                            self.sent.append(packet)
+                            responses = []
+                            if packet.message == HU_VERSION:
+                                responses = [Packet(CMD, VERSION_MATCH, protobuf(f1=1)),
+                                    Packet(CMD, MD_INFO, protobuf(f15=NATIVE_MEDIACODEC_AU_MARKER))]
+                            elif packet.message == VIDEO_INIT:
+                                responses = [Packet(CMD, VIDEO_INIT_DONE, protobuf(f1=1280, f2=720, f3=30))]
+                            elif packet.message == VIDEO_START:
+                                responses = [Packet(MEDIA, MEDIA_INIT, protobuf(f1=48000, f2=2, f3=16))]
+                            elif packet.message == PAUSE_MEDIA:
+                                self.audio_active.clear()
+                                tail = Packet(MEDIA, MEDIA_DATA, b"\x02\x00" * 960, 9999).encode()
+                                self.incoming.put(tail[:8])
+                                self.incoming.put(tail[8:])
+                            for response in responses:
+                                self.incoming.put(response.encode())
+                            if packet.message == VIDEO_START:
+                                self.audio_active.set()
+                        return len(data)
+
+                    def close(self):
+                        self.cancel.set()
+
+                handle = Handle()
+                owner = open(self.root / f"audio-lock-{already_paused}", "a+")
+                stream = USBStream(SimpleNamespace(close=lambda: None), handle, owner,
+                                   {"backend": "DIRECT_USB_AOA", "adb_data_plane": False})
+                client = HUClient("direct-usb", 0, self.root / f"audio-stop-{already_paused}",
+                                  backend="DIRECT_USB_AOA", transport_factory=lambda: stream)
+                self.addCleanup(client.stop)
+
+                def wait_for(predicate):
+                    deadline = time.monotonic() + 2
+                    while not predicate() and time.monotonic() < deadline:
+                        time.sleep(.005)
+                    self.assertTrue(predicate(), client.error)
+
+                client.start()
+                wait_for(lambda: client.audio.summary()["lanes"]["MEDIA"]["data_packets"] >= 3)
+                if already_paused:
+                    client.pause()
+                    wait_for(lambda: any(p.message == VIDEO_PAUSE for p in handle.sent))
+                    before = client.audio.summary()["lanes"]["MEDIA"]["data_packets"]
+                    wait_for(lambda: client.audio.summary()["lanes"]["MEDIA"]["data_packets"] > before)
+                stop_command_index = len(handle.sent)
+                client.stop()
+                stopping = [p.message for p in handle.sent[stop_command_index:]]
+                self.assertEqual(stopping, [PAUSE_MEDIA] if already_paused else [PAUSE_MEDIA, VIDEO_PAUSE])
+                self.assertTrue(stream.closed)
+                self.assertIsNone(client.error)
+                self.assertTrue(client.native_shutdown_drain["quiescent"])
+                self.assertEqual(client.framing_pending_bytes, 0)
+                self.assertLess(client.native_shutdown_drain["elapsed_seconds"], 3.5)
+                audio = client.audio.summary()["lanes"]["MEDIA"]
+                self.assertEqual(audio["last_timestamp_raw"], 9999)
+                self.assertEqual(audio["errors"], 0)
+                self.assertFalse(client.summary()["workers_alive"])
 
     def test_native_marker_cannot_masquerade_as_dev_and_vice_versa(self):
         for backend, marker in (("DIRECT_USB_AOA", MEDIACODEC_AU_MARKER),

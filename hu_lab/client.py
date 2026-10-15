@@ -1168,6 +1168,10 @@ class HUClient:
             try:
                 if self.pending_touch:
                     self.cancel_touch("disconnect")
+                if self.backend == "DIRECT_USB_AOA" and self.session.state in ("STREAMING", "PAUSED"):
+                    # Video pause leaves MEDIA running. Stop PCM before waiting
+                    # for the reader's quiet, complete packet boundary.
+                    self.send(Packet(CMD, PAUSE_MEDIA))
                 if self.session.state == "STREAMING":
                     self.send(self.session.pause())
                 deadline = time.monotonic() + .5

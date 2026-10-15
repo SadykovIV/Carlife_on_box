@@ -37,6 +37,8 @@ The full OTA and proprietary OEM applications are not distributed here. This rep
 
 [Current native services/video candidate](docs/NATIVE_CANDIDATE.md) describes implementation, remaining hardware checks and reproducible builds. The [HeadSwap review](docs/HEADSWAP_LESSONS.md) preserves the earlier findings.
 
+Already running native CarLife? The [Magisk runtime update](docs/MAGISK_RUNTIME_UPDATE.md) packages this candidate with a device-backup rollback, retaining the existing boot integration.
+
 ## Start here
 
 1. [Build the Android MD](docs/BUILD_MD.md) — shared source + native USB overlay, JVM tests and a DEX JAR.

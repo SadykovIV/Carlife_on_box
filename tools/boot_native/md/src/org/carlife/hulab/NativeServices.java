@@ -18,6 +18,8 @@ import android.os.SystemClock;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.util.*;
 
 /** Native Android producers. No Android Auto bridge and no callbacks writing USB. */
@@ -66,6 +68,7 @@ final class NativeServices implements AutoCloseable {
     private static android.os.IBinder service(String name)throws Exception{return (android.os.IBinder)Class.forName("android.os.ServiceManager").getMethod("checkService",String.class).invoke(null,name);}
     private boolean registerMedia()throws Exception {
         android.os.IBinder binder=service(Context.MEDIA_SESSION_SERVICE);if(binder==null||!binder.isBinderAlive())return false;
+        ensureMediaFramework();
         // Context caches managers; a manager constructed before its binder exists retains null.
         // A fresh instance is used only for a failed registration, never for an active listener.
         manager=MediaSessionManager.class.getConstructor(Context.class).newInstance(context);
@@ -75,6 +78,27 @@ final class NativeServices implements AutoCloseable {
         Boolean registered=listenerRegistered(manager,sessions);if(Boolean.FALSE.equals(registered))return false;
         pollSessions=registered==null;if(pollSessions&&!verificationUnavailableLogged){verificationUnavailableLogged=true;diagnostic("media_listener_verification_unavailable_polling_snapshot",null);}
         select(manager.getActiveSessions(null));return binder.isBinderAlive();
+    }
+    private static void ensureMediaFramework()throws Exception {
+        // app_process + ActivityThread.systemMain does not run ActivityThread.main's
+        // per-process mainline initialization. Only fill the two media registries;
+        // never re-run all module initializers or replace an existing manager.
+        Class<?> platform;
+        try{platform=Class.forName("android.media.MediaFrameworkPlatformInitializer");}
+        catch(ClassNotFoundException olderPlatform){return;}
+        Class<?> serviceManager=Class.forName("android.media.MediaServiceManager");
+        initializeMediaRegistries(serviceManager,platform);
+        try{initializeMediaRegistries(serviceManager,Class.forName("android.media.MediaFrameworkInitializer"));}
+        catch(ClassNotFoundException olderPlatform){/* Before mainline media registration. */}
+    }
+    static synchronized void initializeMediaRegistries(Class<?> managerType,Class<?>... registries)throws Exception {
+        for(Class<?> registry:registries){
+            java.lang.reflect.Method getter=registry.getMethod("getMediaServiceManager");
+            if(getter.invoke(null)!=null)continue;
+            Object instance=managerType.getConstructor().newInstance();
+            registry.getMethod("setMediaServiceManager",managerType).invoke(null,instance);
+            if(getter.invoke(null)==null)throw new IllegalStateException("media registry initialization not retained: "+registry.getName());
+        }
     }
     // This optional AOSP detail must not become an OEM compatibility requirement.
     static Boolean listenerRegistered(Object manager,Object listener){
@@ -115,7 +139,7 @@ final class NativeServices implements AutoCloseable {
         long next(){return closed||ready||blocked?Long.MAX_VALUE:due;}
         void close(){closed=true;ready=false;}
         static long backoff(int attempt){return Math.min(30000,1000L<<Math.min(5,Math.max(0,attempt-1)));}
-        static boolean permanent(Throwable e){for(Throwable x=e;x!=null;x=x.getCause())if(x instanceof SecurityException||x instanceof UnsupportedOperationException||x instanceof NoSuchMethodException||x instanceof NoSuchFieldException||x instanceof ClassNotFoundException||x instanceof IllegalAccessException)return true;return false;}
+        static boolean permanent(Throwable e){for(Throwable x=e;x!=null;x=x.getCause())if(x instanceof SecurityException||x instanceof UnsupportedOperationException||x instanceof NoSuchMethodException||x instanceof NoSuchFieldException||x instanceof ClassNotFoundException||x instanceof IllegalAccessException||x instanceof NullPointerException)return true;return false;}
     }
     void onHuInfo(byte[] payload){try{wire.huInfo(payload);}catch(IOException e){diagnostic("hu_info_invalid",e);}}
     boolean onCommand(int id,byte[] payload)throws IOException {
@@ -183,5 +207,14 @@ final class NativeServices implements AutoCloseable {
         if(closed)return;closed=true;contextRetry.close();mediaRetry.close();naviRetry.close();voice.close();wire.close();Handler h=worker;final HandlerThread t=thread;
         if(h!=null){h.removeCallbacks(initializeTask);h.post(new Runnable(){public void run(){releaseMedia();releaseNotifications();cover=new byte[0];if(t!=null)t.quitSafely();}});}
     }
-    private static void diagnostic(String event,Throwable e){MdMain.logFields("native_services","state",event,"error_type",e==null?null:e.getClass().getSimpleName());}
+    static String causeChain(Throwable e){
+        if(e==null)return null;StringBuilder b=new StringBuilder();Set<Throwable> seen=Collections.newSetFromMap(new IdentityHashMap<Throwable,Boolean>());
+        for(Throwable x=e;x!=null&&seen.add(x);x=x.getCause()){if(b.length()>0)b.append(" <- ");b.append(x.getClass().getName()).append(": ").append(x.getMessage());}
+        return bounded(b.toString(),1200);
+    }
+    private static String bounded(String value,int limit){return value.length()<=limit?value:value.substring(0,limit)+" [truncated]";}
+    private static void diagnostic(String event,Throwable e){
+        String stack=null;if(e!=null){StringWriter text=new StringWriter();e.printStackTrace(new PrintWriter(text));stack=bounded(text.toString(),3600);}
+        MdMain.logFields("native_services","state",event,"error_type",e==null?null:e.getClass().getSimpleName(),"error_chain",causeChain(e),"error_stack",stack);
+    }
 }

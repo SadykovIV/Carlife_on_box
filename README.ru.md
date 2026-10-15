@@ -37,6 +37,8 @@
 
 [Текущая реализация сервисов и видео](docs/ru/NATIVE_CANDIDATE.md): изменения, ограничения и повторение сборки. [Разбор HeadSwap](docs/ru/HEADSWAP_LESSONS.md) сохраняет прежние результаты.
 
+Если нативный CarLife уже работает, используйте [обновление runtime через Magisk](docs/ru/MAGISK_RUNTIME_UPDATE.md) с возвратом собственной резервной копии бокса и сохранением загрузочной интеграции.
+
 ## С чего начать
 
 1. [Сборка Android MD](docs/ru/BUILD_MD.md) — общий код и native USB overlay, JVM-тесты и DEX JAR.

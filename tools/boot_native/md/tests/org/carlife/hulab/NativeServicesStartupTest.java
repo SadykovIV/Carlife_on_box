@@ -10,9 +10,43 @@ public final class NativeServicesStartupTest {
         public void release(){releases++;}
     }
     static final class ListenerRegistry {private final Map<Object,Object> mListeners=new HashMap<Object,Object>();}
+    public static final class MediaManager {static int constructed;public MediaManager(){constructed++;}}
+    public static final class PlatformRegistry {
+        static MediaManager value;static int sets;
+        public static MediaManager getMediaServiceManager(){return value;}
+        public static void setMediaServiceManager(MediaManager v){if(value!=null)throw new IllegalStateException("duplicate setter");sets++;value=v;}
+    }
+    public static final class MainlineRegistry {
+        static MediaManager value;static int sets;
+        public static MediaManager getMediaServiceManager(){return value;}
+        public static void setMediaServiceManager(MediaManager v){if(value!=null)throw new IllegalStateException("duplicate setter");sets++;value=v;}
+    }
+    public static final class DeniedRegistry {
+        public static MediaManager getMediaServiceManager(){return null;}
+        public static void setMediaServiceManager(MediaManager v){throw new SecurityException("registry denied");}
+    }
+    public static final class LostRegistry {
+        public static MediaManager getMediaServiceManager(){return null;}
+        public static void setMediaServiceManager(MediaManager v){}
+    }
     static byte[] subscribe(int id)throws Exception{ByteArrayOutputStream b=new ByteArrayOutputStream();b.write(MdMain.Proto.ints(1,1));NativeSessionProtocol.bytes(b,2,MdMain.Proto.ints(1,id));return b.toByteArray();}
     static int support(NativeServiceState.Output out)throws Exception {check(out!=null&&out.id==0x10044,"capability ACK");Map<Integer,Object> list=MdMain.Proto.parse(out.payload);return MdMain.Proto.number(MdMain.Proto.parse((byte[])list.get(2)),2,-1);}
     public static void main(String[] args)throws Exception{
+        NativeServices.initializeMediaRegistries(MediaManager.class,PlatformRegistry.class,MainlineRegistry.class);
+        check(PlatformRegistry.value!=null&&MainlineRegistry.value!=null&&MediaManager.constructed==2,"bare app_process initializes both missing media registries");
+        MediaManager platform=PlatformRegistry.value,mainline=MainlineRegistry.value;
+        NativeServices.initializeMediaRegistries(MediaManager.class,PlatformRegistry.class,MainlineRegistry.class);
+        check(PlatformRegistry.value==platform&&MainlineRegistry.value==mainline&&MediaManager.constructed==2&&PlatformRegistry.sets==1&&MainlineRegistry.sets==1,"already initialized process never duplicates managers or setters");
+        MainlineRegistry.value=null;NativeServices.initializeMediaRegistries(MediaManager.class,PlatformRegistry.class,MainlineRegistry.class);
+        check(PlatformRegistry.value==platform&&MainlineRegistry.value!=null&&MediaManager.constructed==3&&PlatformRegistry.sets==1,"partial bootstrap preserves existing registry and fills missing mainline registry");
+        try{NativeServices.initializeMediaRegistries(MediaManager.class,DeniedRegistry.class);throw new AssertionError("denied setter swallowed");}
+        catch(InvocationTargetException e){check(e.getCause() instanceof SecurityException&&NativeServices.StartupRetry.permanent(e),"registry permission failure remains visible and terminal");}
+        try{NativeServices.initializeMediaRegistries(MediaManager.class,LostRegistry.class);throw new AssertionError("lost initializer accepted");}
+        catch(IllegalStateException e){check(e.getMessage().contains("not retained"),"initializer readback required");}
+        Throwable wrapped=new InvocationTargetException(new NullPointerException("missing MediaServiceManager"));
+        String chain=NativeServices.causeChain(wrapped);check(chain.contains("InvocationTargetException")&&chain.contains("NullPointerException: missing MediaServiceManager"),"reflection diagnostics retain actionable full cause chain");
+        check(NativeServices.StartupRetry.permanent(wrapped),"persistent constructor NPE is not an endless registration retry");
+        check(NativeServices.causeChain(null)==null,"successful registration has no error chain");
         NativeServices.StartupRetry stage=new NativeServices.StartupRetry();Source source=new Source();
         check(stage.run(0,source)&&!stage.ready()&&source.releases==1,"partial/unavailable registration cleaned");check(stage.next()==1000,"first retry 1s");check(!stage.run(999,source)&&source.attempts==1,"backoff does not re-register");
         source.error=new IOException("binder not ready");check(stage.run(1000,source)&&stage.next()==3000&&!stage.blocked,"transient failure retries with backoff");check(source.releases==2,"failed attempt cleaned");
