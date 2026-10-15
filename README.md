@@ -25,19 +25,21 @@ A fresh system integration seeds **Baidu CarLife** as the default. A later owner
 | Reference native runtime | Tested on the development box with a Honda head unit |
 | Full integrated OTA candidate | Built and checked offline; **not installed or boot-tested** |
 | Other Android boxes | Require a device profile and hardware validation |
-| Audio | Opt-in native PCM candidate; offline tests pass, hardware playback unverified |
-| Separate TTS, microphone and metadata | Implemented offline candidate: AudioPolicy, MediaSession, Yandex notifications, external-PCM recognizer; hardware acceptance pending |
+| Audio | r6 USB PCM verified with Mac HU; audible music/navigation ducking confirmed on Honda with the earlier audio candidate; final r6 Honda recheck pending |
+| Separate TTS, microphone and metadata | Native service registration verified; independent Yandex TTS, HU microphone recognition and metadata display still need application/HU acceptance |
 | Phone verification | Native v2 checksum candidate passes offline tests; legacy RSA and media encryption remain unsupported |
 | Honda multitouch | Packet support exists; independent second-finger coordinates were not obtained in the tested mode |
 | Hardware RESET mode switching | Button event and CarPlay dialog verified; actual switch and a three-mode cycle not verified/implemented |
 | Enforcing SELinux deployment | Not validated; the development firmware was already permissive |
-| Latency | Bounded native AU queue and adaptive bitrate implemented offline; actual improvement requires a device |
+| Latency | Bounded native AU queue and adaptive bitrate implemented; actual end-to-end improvement remains unmeasured |
 
 The full OTA and proprietary OEM applications are not distributed here. This repository contains source, build tools and tests. Building a JAR successfully does not establish compatibility with a new device or head unit.
 
 [Current native services/video candidate](docs/NATIVE_CANDIDATE.md) describes implementation, remaining hardware checks and reproducible builds. The [HeadSwap review](docs/HEADSWAP_LESSONS.md) preserves the earlier findings.
 
 Already running native CarLife? The [Magisk runtime update](docs/MAGISK_RUNTIME_UPDATE.md) packages this candidate with a device-backup rollback, retaining the existing boot integration.
+
+[Download r6 test release](https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.15-r6): update and rollback ZIPs, short English/Russian instructions and SHA256 checksums. These ZIPs update an existing supported installation; they do not provision a clean box.
 
 ## Start here
 
