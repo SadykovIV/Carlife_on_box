@@ -37,6 +37,8 @@
 
 ## С чего начать
 
+Для поддерживаемого TBox Ultra 1 есть [установщик через Magisk](docs/ru/MAGISK_INSTALLER.md): установка, обновление runtime и полный откат без замены всей прошивки. Новый установщик проверен офлайн; аппаратная приёмка на втором боксе ещё предстоит.
+
 1. [Сборка Android MD](docs/ru/BUILD_MD.md) — общий код и native USB overlay, JVM-тесты и DEX JAR.
 2. [Сборка runtime и системного overlay](docs/ru/BUILD_RUNTIME.md) — observer, selector и адресная интеграция SM6350.
 3. [Перенос на другой Android-бокс](docs/ru/PORTING.md) — ранний запуск, USB, видео, ввод, права и выбор режима.
@@ -69,6 +71,7 @@ Android display → зеркало / EGL → MediaCodec H.264 → CarLife MD →
 | `tools/boot_native/observer` | Наблюдатель событий USB ядра |
 | `tools/boot_native/selector` | Сохранение режима, privileged service, код интеграции OEM UI |
 | `tools/boot_native/boot` | Шаблоны раннего init и dispatcher |
+| `tools/magisk` | Установка через Magisk, обновление runtime и точный откат boot |
 | `integration/sm6350` | Сборщик overlay точной прошивки и тесты provisioning |
 | `hu_lab` | Хостовый CarLife HU, USB, протокол, декодирование, окно |
 | `scripts`, `tests` | Переносимая сборка и офлайн-регрессии |

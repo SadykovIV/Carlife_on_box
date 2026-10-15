@@ -37,6 +37,8 @@ The full OTA and proprietary OEM applications are not distributed here. This rep
 
 ## Start here
 
+For a supported TBox Ultra 1, use the [Magisk installer guide](docs/MAGISK_INSTALLER.md) for installation, runtime updates and complete rollback without replacing the full firmware. The new installer is checked offline; hardware acceptance on a second box is still pending.
+
 1. [Build the Android MD](docs/BUILD_MD.md) — shared source + native USB overlay, JVM tests and a DEX JAR.
 2. [Build the runtime and system overlay](docs/BUILD_RUNTIME.md) — observer, selector service and exact SM6350 integration.
 3. [Port to another Android box](docs/PORTING.md) — locate its early projection owner and adapt USB, video, input, permissions and selection.
@@ -82,6 +84,7 @@ The host initiates the Android Open Accessory transition. The box controller own
 | `tools/boot_native/observer` | Authenticated kernel USB event observer |
 | `tools/boot_native/selector` | Saved selection, privileged service and OEM UI integration source |
 | `tools/boot_native/boot` | Early init / dispatcher templates |
+| `tools/magisk` | Magisk installation, runtime updates and exact boot rollback |
 | `integration/sm6350` | Exact reference-firmware system overlay builder and provisioning tests |
 | `hu_lab` | Independent host head unit, native USB, protocol, decode and GUI |
 | `scripts`, `tests` | Portable source builds and offline regressions |
