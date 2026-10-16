@@ -1,8 +1,10 @@
-# Audio, multitouch and startup candidate
+# Historical first audio candidate
+
+> Preserved first audio-candidate record. Its offline-only status, build commands and remaining tasks apply to that historical version. For current MEDIA/TTS/VR, microphone, navigation and calls, use [service status](CARLIFE_SERVICES_STATUS.md); for the one-file installer, use [r8 installation](INSTALL_RELEASE.md).
 
 [Русский](ru/AUDIO_CANDIDATE.md) · [Home](../README.md)
 
-Status: **implemented and tested offline; not installed or hardware accepted**. The preserved reference is commit `3b344d45ae34df215166385ba0c65f195652f5d8`, MD `347c6ef1…`, runtime `a602efce…`. The audio candidate `c7e8cf3` is preserved; follow-up fixes are on `feature/headswap-compat-review`. The box was unavailable during this work. The candidate is not the existing full-image experiment. See the [release-by-release review and remaining work](HEADSWAP_LESSONS.md).
+Status at that stage: **implemented and tested offline; not installed or hardware accepted**. The preserved reference is commit `3b344d45ae34df215166385ba0c65f195652f5d8`, MD `347c6ef1…`, runtime `a602efce…`. The audio candidate `c7e8cf3` is preserved; follow-up fixes are on `feature/headswap-compat-review`. The box was unavailable during this work. The candidate is not the existing full-image experiment. See the [release-by-release review and remaining work](HEADSWAP_LESSONS.md).
 
 ## What changed
 

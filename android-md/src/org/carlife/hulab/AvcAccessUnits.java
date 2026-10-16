@@ -50,9 +50,9 @@ final class AvcAccessUnits {
     private boolean provenLevelOverwrite(int index,byte raw,byte original){
         if(index!=3||(raw&255)!=10)return false;
         int level=original&255;
-        // Same pinned libstagefright overwrite observed in the accepted 720p31
-        // and captured 1080p40 runs. Geometry/level/DPB validation is still mandatory.
-        return level==31||level==40&&expectedMode!=null&&expectedMode.levelIdc==40;
+        // Same pinned libstagefright overwrite captured at 720p30/31, 720p60/32
+        // and 1080p30/40. Geometry/level/DPB validation is still mandatory.
+        return level==31||(level==32||level==40)&&expectedMode!=null&&expectedMode.levelIdc==level;
     }
 
     static final class Au {

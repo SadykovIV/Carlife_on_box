@@ -1,43 +1,28 @@
-# Install or roll back r6
+# Install, update and roll back usb-call-lab2
 
-[Русский](ru/INSTALL_RELEASE.md) · [Download release](https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.15-r6)
+**THIS BUILD HAS NOT BEEN TESTED WITH AN AUTOMOTIVE HEAD UNIT.** This is a prerelease for testing; earlier Honda results do not establish acceptance of this build.
 
-**Choose your installer family; do not mix packages.**
+[Русский](ru/INSTALL_RELEASE.md) · [Detailed guide](MAGISK_INSTALLER.md) · [Service status](CARLIFE_SERVICES_STATUS.md)
 
-| Release file | Use |
-| --- | --- |
-| `Carlife_on_box-TBox-Ultra-1-first-install-2026.10.15-r6.zip` | First installation on a compatible box; also updates installations created by this installer. |
-| `Carlife_on_box-TBox-Ultra-1-update-2026.10.15-r6.zip` | Runtime update for the existing manually integrated reference installation. |
-| `Carlife_on_box-TBox-Ultra-1-rollback-2026.10.15-r6.zip` | Reverts that runtime update; **not** a full uninstall or first-install rollback. |
+**One file: `Carlife_on_box-TBox-Ultra-2026.10.16-usb-call-lab2.zip`.** Download it from the [prerelease](<https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.16-usb-call-lab2>).
 
-The first-install family appears in Magisk as **Baidu CarLife on Android Box** (`carlife_on_box`); reuse its first-install ZIP for updates. The legacy module is **CarLife runtime update** (`carlife_runtime_update`).
+SHA256: `957c5b2a8a471aced1d6349c29d764f52dde95bcbf12557b67b8941381dae0b4`.
 
-## First installation
+This build integrates USB-only call audio without a Bluetooth dependency and reduces redundant status commands. The development-box update, 56 JVM suites, 133 host tests and Mac synthetic duplex/mute/reconnect checks passed. Real SIM/VoIP calls, physical HU microphone and this build's Honda acceptance remain pending. Clean installation on a second physical TBox is unverified.
 
-Supported profile: TBox Ultra 1, SM6350, Android 15 / SDK 35, matching OEM startup files, working Magisk **30.7+**, unlocked bootloader and an **already permissive** reference firmware. The installer checks compatibility; it does not unlock the device or change security settings.
+1. Use a compatible **TBox Ultra 1 / SM6350 / Android 15** with working Magisk/root. First install requires Magisk 30.7+, an already unlocked bootloader and the reference firmware's existing permissive mode. The installer checks OEM files and does not change security settings.
+2. Verify the ZIP against the release checksum. Keep stable power, then select it in **Magisk → Modules → Install from storage**.
+3. Reboot once. The same ZIP handles first install, earlier universal installations and the supported manual integration. OEM settings are included. Fresh defaults: **Baidu CarLife**, video **Requested by head unit**; updates keep saved choices.
 
-1. Download the first-install ZIP; check SHA256 against the release's `SHA256SUMS`.
-2. Keep stable power connected. In **Magisk → Modules → Install from storage**, select the ZIP and wait for success.
-3. Reboot once and connect to a ready CarLife head unit. **Baidu CarLife is the initial default**; later saved choices are retained.
+Only first installation saves and patches this device's active boot; runtime updates retain boot. No full flashing or computer-side boot extraction is required. Keep Wi-Fi ADB or your backup display for maintenance while USB serves CarLife.
 
-The ZIP saves and patches this box's own active boot on-device. It contains no borrowed boot image and does not flash the full firmware. Subsequent runtime updates preserve the first backup and do not rewrite boot. Existing ADB settings remain; USB is used for projection, so retain Wi-Fi ADB or your backup display for maintenance. This ZIP does not add a third item to the OEM AA/CarPlay menu.
-
-## Existing manually integrated installation
-
-Install the update ZIP through **Magisk → Modules → Install from storage** and reboot. **CarLife runtime update → Action** shows the result. This package retains the existing boot integration.
-
-## Rollback
-
-**First-install family:** run in a rooted Android terminal or existing ADB shell:
+To inspect or undo the package, run in a rooted Android terminal or existing ADB shell:
 
 ```sh
-su -c '/data/adb/magisk/busybox sh /data/adb/carlife-on-box/manager.sh rollback'
+su -c '/data/adb/magisk/busybox sh /data/adb/carlife-package/control.sh status'
+su -c '/data/adb/magisk/busybox sh /data/adb/carlife-package/control.sh rollback'
 ```
 
-After successful restoration, reboot. This restores this box's exact pre-install boot, including Magisk, and removes CarLife. Alternatively, use **Magisk → Remove**, reboot to run removal, then reboot again into the restored boot. Keep `/data/adb/carlife-on-box/` backups.
+After successful rollback, reboot. **Fresh/universal:** original boot is restored and managed CarLife removed. **Earlier manual integration:** exact runtime/UI from before the first combined ZIP returns; earlier CarLife and boot remain. Both restore the preceding OEM overlay state. No separate rollback ZIP is needed.
 
-**Legacy installation:** install the rollback ZIP through Magisk and reboot. This restores its first saved runtime; CarLife integration and boot remain. Disabling/removing the delivery module alone does not undo applied files.
-
-## Validation
-
-First installation is **offline-tested; hardware acceptance is pending**. r6 runtime update and native USB video/PCM passed on the development box with Mac HU; final r6 Honda recheck remains pending. See the detailed [first-install guide](MAGISK_INSTALLER.md) and [runtime-update results](MAGISK_RUNTIME_UPDATE.md).
+Preserve `/data/adb/carlife-package/` and backend backups. Disabling/removing one module alone is not full rollback. See [the detailed guide](MAGISK_INSTALLER.md) for conflicts and recovery boundaries. Older r6/r7 multi-file instructions remain historical and do not apply to the combined package.

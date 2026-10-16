@@ -1,9 +1,12 @@
 package org.carlife.hulab;
 
 import android.app.Notification;
+import android.app.PendingIntent;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.media.MediaMetadata;
 import android.graphics.Bitmap;
 import java.io.ByteArrayOutputStream;
@@ -18,6 +21,8 @@ import android.os.SystemClock;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
 import java.io.IOException;
+import java.io.InputStream;
+import java.util.concurrent.TimeUnit;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.util.*;
@@ -27,19 +32,21 @@ final class NativeServices implements AutoCloseable {
     static final class Output {final int id;final byte[] payload;Output(int id,byte[] p){this.id=id;payload=p;}}
     private final NativeServiceState wire=new NativeServiceState();
     private final NativeVoice voice;
+    private final NativeMicrophone microphone;
     private HandlerThread thread;private Handler worker;private Context context;
     private MediaSessionManager manager;private volatile MediaController controller;
     private MediaController.Callback mediaCallback;private Notifications notifications;
-    private volatile boolean closed;private boolean mediaReady,naviReady,voicePrepared,ticking,capabilitiesReported,pollSessions,verificationUnavailableLogged;
+    private volatile boolean callHold,actualCommunication;private volatile boolean closed;private volatile Process appLaunchProcess;private boolean appLaunchPending;private Runnable appLaunchLatest;private boolean mediaReady,naviReady,voicePrepared,ticking,capabilitiesReported,pollSessions,verificationUnavailableLogged;
     private final StartupRetry contextRetry=new StartupRetry(),mediaRetry=new StartupRetry(),naviRetry=new StartupRetry();
     private long voiceNext;private int voiceAttempts;
     private final Runnable initializeTask=new Runnable(){public void run(){initialize();}};
+    private volatile PendingIntent routeStop;
     private String routeKey,coverKey;private byte[] cover=new byte[0];private long controllerEpoch;
     private MediaSessionManager.OnActiveSessionsChangedListener sessions;private long mediaRegistrationEpoch;
-    NativeServices(String recognizerComponent){voice=new NativeVoice(wire,recognizerComponent);}
+    NativeServices(String recognizerComponent){voice=new NativeVoice(wire,recognizerComponent);microphone=new NativeMicrophone(new NativeMicrophone.Demand(){public void changed(boolean wanted){wire.applicationMicrophone(wanted);}},new NativeMicrophone.RouteListener(){public void changed(NativeMicrophone.Recorder recorder){voice.onMicrophoneRoute(recorder);}public void communicationChanged(boolean active){actualCommunication=active;voice.onCommunicationChanged(active||callHold);}});voice.attachMicrophone(microphone);}
     synchronized void start(){
         if(thread!=null||closed)return;thread=new HandlerThread("carlife-native-services");thread.start();worker=new Handler(thread.getLooper());
-        worker.post(initializeTask);
+        worker.post(initializeTask);microphone.start();
     }
     private void initialize(){
         if(closed)return;long now=SystemClock.uptimeMillis();
@@ -119,7 +126,7 @@ final class NativeServices implements AutoCloseable {
         try{wire.media("","","","","",0,0,false,0,new byte[0]);}catch(IOException ignored){}
     }
     private void releaseNotifications(){
-        Notifications old=notifications;notifications=null;routeKey=null;
+        Notifications old=notifications;notifications=null;routeKey=null;routeStop=null;
         try{if(old!=null)NotificationListenerService.class.getMethod("unregisterAsSystemService").invoke(old);}catch(Exception e){diagnostic("notification_listener_close_failed",e);}
         try{wire.route(null);}catch(IOException ignored){}
     }
@@ -144,23 +151,73 @@ final class NativeServices implements AutoCloseable {
     void onHuInfo(byte[] payload){try{wire.huInfo(payload);}catch(IOException e){diagnostic("hu_info_invalid",e);}}
     boolean onCommand(int id,byte[] payload)throws IOException {
         if(closed)return false;if(wire.command(id,payload))return true;
-        if(id==0x18028){Map<Integer,Object> f=MdMain.Proto.parse(payload);if(MdMain.Proto.number(f,1,-1)==4){if(MdMain.Proto.number(f,2,0)==1)return voice.start();voice.stop();return true;}}
-        if(id==0x1801f)return launchNavi();if(id==0x18020)return launchMedia();return false;
+        if(id==0x18028){Map<Integer,Object> f=MdMain.Proto.parse(payload);if(MdMain.Proto.number(f,1,-1)==2&&MdMain.Proto.number(f,2,-1)==0)stopNavigation();if(MdMain.Proto.number(f,1,-1)==4){if(MdMain.Proto.number(f,2,0)==1){voice.start();return true;}voice.stop();return true;}}
+        if(id==0x1801e)return launchPhone();if(id==0x1801f)return launchNavi();if(id==0x18020)return launchMedia();return false;
     }
     boolean onHardkey(final int key){
-        if(closed)return false;if(key==0x21)return voice.start();if(key==0x22){voice.stop();return true;}
+        if(closed)return false;if(key==0x21){voice.start();return true;}if(key==0x22){voice.stop();return true;}
         if(key==0x0b)return launchNavi();if(key==0x09)return launchMedia();
         if(key!=0x0f&&key!=0x10&&key!=0x1f&&key!=0x20)return false;
         final MediaController target=controller;Handler h=worker;if(target==null||h==null)return false;
         h.post(new Runnable(){public void run(){if(closed||target!=controller)return;try{MediaController.TransportControls c=target.getTransportControls();if(key==0x0f)c.skipToPrevious();else if(key==0x10)c.skipToNext();else if(key==0x1f)c.play();else c.pause();}catch(RuntimeException e){diagnostic("media_key_failed",e);}}});return true;
     }
-    void onMic(byte[] pcm,int timestamp){if(!closed)voice.onMic(pcm,timestamp);}
+    void callAudioHold(boolean value){if(closed||callHold==value)return;callHold=value;microphone.callHold(value);voice.onCommunicationChanged(value||actualCommunication);}
+    boolean callAudioRetired(){return !closed&&callHold&&microphone.callRetired()&&voice.callRetired()&&wire.nonCallMicrophoneIdle();}
+    void callVoice(boolean value){if(!closed)wire.callVoice(value);}
+    void callMicrophone(boolean value){if(!closed)wire.callMicrophone(value);}
+    void onMic(byte[] pcm,int timestamp){if(!closed&&!callHold){microphone.onMic(pcm,timestamp);voice.onMic(pcm,timestamp);}}
     Output poll(){NativeServiceState.Output p=wire.poll();return p==null?null:new Output(p.id,p.payload);}
     boolean routeNaviWanted(){return wire.routeNaviWanted();}
-    boolean voiceActive(){return voice.active();}
-    private boolean launchNavi(){Handler h=worker;if(h==null||context==null)return false;h.post(new Runnable(){public void run(){for(String pkg:new String[]{"ru.yandex.yandexnavi","ru.yandex.yandexmaps"})if(launch(pkg))return;diagnostic("yandex_app_unavailable",null);}});return true;}
-    private boolean launchMedia(){final MediaController c=controller;Handler h=worker;if(c==null||h==null)return false;h.post(new Runnable(){public void run(){launch(c.getPackageName());}});return true;}
-    private boolean launch(String pkg){if(closed)return false;try{Intent i=context.getPackageManager().getLaunchIntentForPackage(pkg);if(i==null)return false;context.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));return true;}catch(RuntimeException e){diagnostic("app_launch_failed",e);return false;}}
+    boolean voiceActive(){return wire.voiceModuleActive();}
+    void assistantPlaybackActive(boolean active){if(closed)return;try{wire.voiceModule(false,active);}catch(IOException e){diagnostic("assistant_module_encode_failed",e);}}
+    private synchronized boolean dispatchAppLaunch(final Runnable action){
+        if(closed||worker==null||context==null)return false;
+        if(appLaunchPending){appLaunchLatest=action;diagnostic("app_launch_coalesced_latest",null);return true;}
+        appLaunchPending=true;
+        Thread launch=new Thread(new Runnable(){public void run(){
+            Runnable next=action;
+            while(next!=null){
+                try{if(!closed)next.run();}catch(RuntimeException e){diagnostic("app_launch_failed",e);}
+                synchronized(NativeServices.this){next=closed?null:appLaunchLatest;appLaunchLatest=null;if(next==null)appLaunchPending=false;}
+            }
+        }},"carlife-app-launch");
+        launch.setDaemon(true);try{launch.start();return true;}catch(RuntimeException e){appLaunchPending=false;appLaunchLatest=null;diagnostic("app_launch_dispatch_failed",e);return false;}
+    }
+    private boolean launchPhone(){
+        return dispatchAppLaunch(new Runnable(){public void run(){
+            if(closed)return;
+            try{Intent intent=new Intent(Intent.ACTION_DIAL);ResolveInfo r=context.getPackageManager().resolveActivity(intent,PackageManager.MATCH_DEFAULT_ONLY);
+                if(r==null||r.activityInfo==null||!r.activityInfo.enabled||!r.activityInfo.exported){diagnostic("dialer_unavailable",null);return;}
+                intent.setComponent(new ComponentName(r.activityInfo.packageName,r.activityInfo.name));launchIntent(intent,r.activityInfo.packageName);
+            }catch(RuntimeException e){diagnostic("dialer_launch_failed",e);}
+        }});
+    }
+    private boolean launchNavi(){return dispatchAppLaunch(new Runnable(){public void run(){for(String pkg:new String[]{"ru.yandex.yandexnavi","ru.yandex.yandexmaps"})if(launch(pkg))return;diagnostic("yandex_app_unavailable",null);}});}
+    private boolean launchMedia(){final MediaController c=controller;if(c==null)return false;return dispatchAppLaunch(new Runnable(){public void run(){if(!closed&&c==controller)launch(c.getPackageName());}});}
+    private boolean launch(String pkg){
+        if(closed)return false;
+        try{return launchIntent(context.getPackageManager().getLaunchIntentForPackage(pkg),pkg);}
+        catch(RuntimeException e){diagnostic("app_launch_failed",e);return false;}
+    }
+    private boolean launchIntent(Intent intent,String pkg){
+        if(closed||intent==null||intent.getComponent()==null)return false;
+        Process child=null;final ByteArrayOutputStream output=new ByteArrayOutputStream();
+        try{
+            ArrayList<String> args=NativeVoice.voiceUiAmArgs(intent.getAction(),intent.getComponent().flattenToString(),intent.getDataString(),MdMain.sourceDisplayId);
+            if(intent.getCategories()!=null)for(String category:intent.getCategories()){args.add("-c");args.add(category);}
+            // This one coalesced launch slot never blocks USB or the notification,
+            // navigation-stop and metadata worker. app_process has no registered
+            // ApplicationThread; am checks this process's unchanged UID instead.
+            synchronized(this){if(closed)return false;child=new ProcessBuilder(args).redirectErrorStream(true).start();appLaunchProcess=child;}
+            final InputStream stream=child.getInputStream();
+            Thread drain=new Thread(new Runnable(){public void run(){try{byte[] b=new byte[512];int n;while((n=stream.read(b))!=-1)synchronized(output){int take=Math.min(n,4096-output.size());if(take>0)output.write(b,0,take);}}catch(IOException ignored){}}},"carlife-app-am-output");drain.setDaemon(true);drain.start();
+            boolean completed=child.waitFor(3000,TimeUnit.MILLISECONDS);if(completed)drain.join(50);
+            String result;synchronized(output){result=new String(output.toByteArray(),java.nio.charset.StandardCharsets.UTF_8);}
+            boolean ok=!closed&&completed&&NativeVoice.amStartSucceeded(child.exitValue(),result);
+            MdMain.logFields("native_services","state",ok?"app_launched":"app_launch_failed","package",pkg,"display_id",MdMain.sourceDisplayId,"backend","am_same_uid","completed",completed,"launch_output",result);return ok;
+        }catch(Exception e){if(e instanceof InterruptedException)Thread.currentThread().interrupt();diagnostic("app_launch_failed",e);return false;}
+        finally{synchronized(this){if(appLaunchProcess==child)appLaunchProcess=null;}if(child!=null){if(child.isAlive())child.destroyForcibly();try{child.getInputStream().close();}catch(IOException ignored){}}}
+    }
     private void select(List<MediaController> list){try{selectInternal(list);}catch(RuntimeException e){diagnostic("session_selection_failed",e);++controllerEpoch;MediaController old=controller;controller=null;try{if(old!=null&&mediaCallback!=null)old.unregisterCallback(mediaCallback);}catch(RuntimeException ignored){}refresh();}}
     private void selectInternal(List<MediaController> list){
         if(closed)return;MediaController chosen=null;
@@ -191,20 +248,26 @@ final class NativeServices implements AutoCloseable {
     }
     static int position(PlaybackState p,long duration){if(p==null)return 0;long n=p.getPosition();if(p.getState()==PlaybackState.STATE_PLAYING&&p.getLastPositionUpdateTime()>0)n+=(long)(Math.max(0,SystemClock.elapsedRealtime()-p.getLastPositionUpdateTime())*p.getPlaybackSpeed());if(duration>0)n=Math.min(n,duration);return NativeServiceState.saturate(n);}
     private static String value(MediaMetadata m,String key){String v=m==null?null:m.getString(key);return v==null?"":v;}
+    private void stopNavigation(){
+        final PendingIntent target=routeStop;Handler h=worker;
+        if(target==null||h==null){diagnostic("navigation_stop_action_unavailable",null);return;}
+        h.post(new Runnable(){public void run(){if(closed||target!=routeStop)return;try{target.send();diagnostic("navigation_stop_action_sent",null);}catch(PendingIntent.CanceledException e){diagnostic("navigation_stop_action_cancelled",e);}}});
+    }
     private void posted(StatusBarNotification s){try{postedInternal(s);}catch(RuntimeException e){diagnostic("notification_parse_failed",e);}}
     private void postedInternal(StatusBarNotification s){
-        if(closed||s==null||!YandexNotificationRoute.supports(s.getPackageName()))return;Notification n=s.getNotification();Bundle b=n==null?null:n.extras;if(b==null)return;
-        YandexNotificationRoute.Turn turn=YandexNotificationRoute.parse(s.getPackageName(),text(b,Notification.EXTRA_TITLE),text(b,Notification.EXTRA_TEXT),text(b,Notification.EXTRA_BIG_TEXT));
-        try{if(turn!=null){routeKey=s.getKey();wire.route(turn);}else if(s.getKey().equals(routeKey)){routeKey=null;wire.route(null);}if(turn==null)diagnostic("yandex_notification_without_explicit_supported_maneuver",null);}catch(IOException e){diagnostic("navigation_encode_failed",e);}
+        if(closed||s==null||!YandexNotificationRoute.supports(s.getPackageName()))return;Notification n=s.getNotification();
+        YandexNotificationRoute.Turn turn=YandexNotificationData.read(context,s.getPackageName(),n);
+        if(turn!=null)turn=turn.withSource(s.getKey());
+        try{if(turn!=null){boolean first=!s.getKey().equals(routeKey);routeKey=s.getKey();routeStop=YandexNotificationData.stopAction(context,s.getPackageName(),n);wire.route(turn);if(first)MdMain.logFields("native_navigation","source",s.getPackageName(),"turn",turn.nextTurn,"meters",turn.meters,"icon_bytes",turn.icon.length);}else if(s.getKey().equals(routeKey)){routeKey=null;routeStop=null;wire.route(null);}if(turn==null)diagnostic("yandex_notification_without_explicit_supported_maneuver",null);}catch(IOException e){diagnostic("navigation_encode_failed",e);}
     }
     private static String text(Bundle b,String key){CharSequence s=b.getCharSequence(key);return s==null?"":s.toString();}
     private final class Notifications extends NotificationListenerService {
-        public void onListenerConnected(){Handler h=worker;if(h!=null)h.post(new Runnable(){public void run(){if(closed||Notifications.this!=notifications)return;try{StatusBarNotification[] all=getActiveNotifications();if(all!=null)for(StatusBarNotification s:all)posted(s);}catch(RuntimeException e){diagnostic("notification_snapshot_failed",e);}}});}
+        public void onListenerConnected(){Handler h=worker;if(h!=null)h.post(new Runnable(){public void run(){if(closed||Notifications.this!=notifications)return;try{StatusBarNotification[] all=getActiveNotifications();if(all!=null){Arrays.sort(all,new Comparator<StatusBarNotification>(){public int compare(StatusBarNotification a,StatusBarNotification b){return Long.compare(a.getPostTime(),b.getPostTime());}});for(StatusBarNotification s:all)posted(s);}}catch(RuntimeException e){diagnostic("notification_snapshot_failed",e);}}});}
         public void onNotificationPosted(final StatusBarNotification s){Handler h=worker;if(h!=null)h.post(new Runnable(){public void run(){if(!closed&&Notifications.this==notifications)posted(s);}});}
-        public void onNotificationRemoved(final StatusBarNotification s){Handler h=worker;if(h!=null)h.post(new Runnable(){public void run(){if(!closed&&Notifications.this==notifications&&s!=null&&s.getKey().equals(routeKey)){routeKey=null;try{wire.route(null);}catch(IOException ignored){}}}});}
+        public void onNotificationRemoved(final StatusBarNotification s){Handler h=worker;if(h!=null)h.post(new Runnable(){public void run(){if(!closed&&Notifications.this==notifications&&s!=null&&s.getKey().equals(routeKey)){routeKey=null;routeStop=null;try{wire.route(null);}catch(IOException ignored){}}}});}
     }
     public synchronized void close(){
-        if(closed)return;closed=true;contextRetry.close();mediaRetry.close();naviRetry.close();voice.close();wire.close();Handler h=worker;final HandlerThread t=thread;
+        if(closed)return;closed=true;Process launch=appLaunchProcess;appLaunchProcess=null;if(launch!=null)launch.destroyForcibly();contextRetry.close();mediaRetry.close();naviRetry.close();voice.close();wire.close();microphone.close();Handler h=worker;final HandlerThread t=thread;
         if(h!=null){h.removeCallbacks(initializeTask);h.post(new Runnable(){public void run(){releaseMedia();releaseNotifications();cover=new byte[0];if(t!=null)t.quitSafely();}});}
     }
     static String causeChain(Throwable e){

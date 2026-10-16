@@ -12,7 +12,7 @@ public final class SplitAudioSourceTest {
         final CarLifeAudio.Lane lane;int readBytes,closes;boolean failClose;
         Record(CarLifeAudio.Lane lane){this.lane=lane;}
         public void start(){}
-        public int read(byte[] data,int offset,int size){if(readBytes>=lane.chunkBytes*2)return 0;int n=Math.min(111,Math.min(size,lane.chunkBytes*2-readBytes));Arrays.fill(data,offset,offset+n,(byte)(lane==CarLifeAudio.Lane.MEDIA?17:34));readBytes+=n;return n;}
+        public int read(byte[] data,int offset,int size){if(readBytes>=lane.chunkBytes*2)return 0;int n=Math.min(111,Math.min(size,lane.chunkBytes*2-readBytes));Arrays.fill(data,offset,offset+n,(byte)((lane.ordinal()+1)*17));readBytes+=n;return n;}
         public void close()throws IOException{closes++;if(failClose)throw new IOException("record release failure");}
     }
     static class Platform implements AudioPolicySources.Platform {
@@ -33,7 +33,8 @@ public final class SplitAudioSourceTest {
     }
     public static void main(String[] args)throws Exception{
         for(int usage:new int[]{0,1,14})check(AudioUsage.isMedia(usage)&&!AudioUsage.isSpeech(usage),"media usage separated "+usage);
-        for(int usage:new int[]{12,16})check(AudioUsage.isSpeech(usage)&&!AudioUsage.isMedia(usage),"speech usage separated "+usage);
+        check(AudioUsage.isSpeech(12)&&!AudioUsage.isAssistant(12)&&!AudioUsage.isMedia(12),"navigation speech separated");
+        check(AudioUsage.isAssistant(16)&&!AudioUsage.isSpeech(16)&&!AudioUsage.isMedia(16),"assistant speech separated from navigation and media");
         for(int usage:new int[]{2,3,4,5,6,7,10,11,13,15})check(!AudioUsage.isMedia(usage)&&!AudioUsage.isSpeech(usage),"calls/notifications/virtual source not rerouted "+usage);
         int[] roles=AudioUsage.forLane(CarLifeAudio.Lane.MEDIA);roles[0]=16;check(AudioUsage.forLane(CarLifeAudio.Lane.MEDIA)[0]==0,"route arrays cannot be mutated by caller");
         Map<Integer,Object> ttsInit=MdMain.Proto.parse(CarLifeAudio.Lane.TTS.init());check(MdMain.Proto.number(ttsInit,1,0)==16000&&MdMain.Proto.number(ttsInit,2,0)==1&&MdMain.Proto.number(ttsInit,3,0)==16,"TTS wire actual format");

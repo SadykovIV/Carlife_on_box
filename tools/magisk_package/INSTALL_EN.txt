@@ -1,0 +1,19 @@
+One ZIP for compatible TBox Ultra 1 / SM6350 / Android 15.
+
+Magisk -> Modules -> Install from storage -> select this ZIP -> reboot once.
+The installer detects clean installation, its earlier universal installation,
+or the supported existing native runtime. It installs settings in the same step.
+Fresh installation saves and patches only this device's active boot. Updates
+retain boot and saved settings. Existing Magisk/root is required.
+
+Rollback without another download:
+su -c '/data/adb/magisk/busybox sh /data/adb/carlife-package/control.sh rollback'
+Then reboot. A universal installation restores its original boot and removes
+CarLife. A legacy installation restores the exact runtime/settings preceding
+the FIRST installation of this combined ZIP; earlier CarLife remains installed.
+Backups stay in /data/adb/carlife-package and the original backend recovery paths.
+
+For status replace rollback with status. Do not delete these backups. Keep
+stable power during the first installation's boot write. Incompatible firmware
+is rejected without changing its security settings. Fresh installation on a
+second physical box remains pending; offline tests are not hardware acceptance.

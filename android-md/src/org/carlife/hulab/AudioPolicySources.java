@@ -12,7 +12,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.EnumMap;
 
-/** One privileged Android policy, two disjoint playback sinks. No permission changes. */
+/** One privileged Android policy, disjoint media/navigation/assistant sinks. No permission changes. */
 final class AudioPolicySources {
     interface Platform {
         void register() throws Exception;

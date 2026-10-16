@@ -20,14 +20,14 @@ TESTS = [
     'MdWireTest', 'MdWriterRaceTest', 'MdWatchdogRaceTest', 'DrainUntilStoppedTest',
     'PipelineProgressTest', 'AvcAccessUnitsTest', 'SourceLeaseTest', 'ProjectionTouchTest', 'LegacyMultitouchTest',
     'OemCsdGuardTest', 'AccessoryTransportTest', 'NativeSessionBoundaryTest', 'AsyncRingLogTest',
-    'BootPendingInitTest', 'CarLifeFrameReaderTest', 'NativeCompatibilityTest', 'NativePhoneVerificationTest',
+    'BootPendingInitTest', 'CarLifeFrameReaderTest', 'NativeCompatibilityTest', 'NativePhoneVerificationTest', 'NativeHuControlsTest',
     'AccessoryPacketWriteTest', 'NativePauseHeartbeatTest', 'AccessoryProgressDiagnosticsTest',
-    'NativeOwnerRetirementTest', 'NativeTouchRecoveryTest', 'NativeLegacyMultitouchTest', 'NativeFeatureResponseDiagnosticsTest',
+    'NativeOwnerRetirementTest', 'NativeProcessExitTest', 'NativeTouchRecoveryTest', 'NativeLegacyMultitouchTest', 'NativeFeatureResponseDiagnosticsTest',
     'NativeTouchWireDiagnosticsTest', 'NativeAsyncTouchInjectionTest', 'NativeEncoderPriorityTest',
     'VideoDiagnosticPolicyTest', 'NativeVideoDiagnosticsEntryTest',
-    'CarLifeAudioTest', 'PcmAudioSessionTest', 'NativeAudioSessionTest',
+    'CarLifeAudioTest', 'PcmAudioSessionTest', 'NativeAudioSessionTest', 'NativeApplicationMicStateTest',
     'SplitAudioSourceTest', 'VideoQueueTest', 'VideoRateControlTest', 'FrameRatePacingTest',
-    'NativeVideoFlowTest', 'NativeVideoConfigTest', 'NativeVideoSettingsCommandTest', 'VideoModeTest', 'NativeSplitAudioSessionTest', 'NativeServicesTest', 'NativeServicesStartupTest', 'NativeVoiceQueueTest', 'NativeServicesSessionTest',
+    'NativeVideoFlowTest', 'NativeVideoConfigTest', 'NativeVideoSettingsCommandTest', 'VideoModeTest', 'NativeSplitAudioSessionTest', 'NativeVrAudioSessionTest', 'NativeVrStopTest', 'NativeServicesTest', 'YandexRouteTest', 'NativeServicesStartupTest', 'NativeVoiceQueueTest', 'VoiceUiStateTest', 'NativeMicrophoneTest', 'NativeMicrophoneCallGuardTest', 'NativeCallAudioTest', 'NativeCallSessionTest', 'NativeServicesSessionTest',
 ]
 
 

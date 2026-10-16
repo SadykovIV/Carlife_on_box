@@ -10,41 +10,59 @@ import java.util.*;
 
 /** Android player events, independent of PCM amplitude and CarLife video state. */
 final class PlaybackActivity {
-    interface Listener {void changed(long epoch,boolean newMediaStart);void degraded(long epoch,String detail);}
+    interface Listener {
+        void changed(long epoch,boolean newMediaStart);
+        default void changed(long epoch,boolean newMediaStart,boolean newAssistantStart){changed(epoch,newMediaStart);}
+        void degraded(long epoch,String detail);
+    }
     interface Observer {void update(Snapshot value);void failed(String detail);}
     interface Source {void start(Observer observer)throws Exception;void close();}
     static final class Snapshot {
-        final Set<Integer> output,media,speech;
-        Snapshot(Set<Integer> output,Set<Integer> media){this.output=new HashSet<Integer>(output);this.media=new HashSet<Integer>(media);this.speech=new HashSet<Integer>(output);this.speech.removeAll(media);}
+        final Set<Integer> output,media,speech,assistant;
+        // Compatibility for the original two-role fixtures/callers; production
+        // uses explicitly classified Android attributes via the four-set form.
+        Snapshot(Set<Integer> output,Set<Integer> media){this(output,media,difference(output,media),Collections.<Integer>emptySet());}
+        Snapshot(Set<Integer> output,Set<Integer> media,Set<Integer> speech,Set<Integer> assistant){
+            this.output=new HashSet<Integer>(output);this.media=new HashSet<Integer>(media);this.speech=new HashSet<Integer>(speech);this.assistant=new HashSet<Integer>(assistant);
+            if(!Collections.disjoint(this.media,this.speech)||!Collections.disjoint(this.media,this.assistant)||!Collections.disjoint(this.speech,this.assistant))throw new IllegalArgumentException("player belongs to multiple audio lanes");
+            HashSet<Integer> all=new HashSet<Integer>(this.media);all.addAll(this.speech);all.addAll(this.assistant);
+            if(!this.output.equals(all))throw new IllegalArgumentException("output player set differs from classified lanes");
+        }
+        private static Set<Integer> difference(Set<Integer> output,Set<Integer> media){Set<Integer> result=new HashSet<Integer>(output);result.removeAll(media);return result;}
     }
     private final Source source;private final Listener listener;
-    private boolean started,known,disabled;private long epoch;
-    private volatile boolean outputActive=true,mediaActive=true,speechActive;
-    private Set<Integer> output=Collections.emptySet(),media=Collections.emptySet();
+    private boolean started,known,disabled;private long epoch;private volatile long assistantStarts;
+    private volatile boolean outputActive=true,mediaActive=true,speechActive,assistantActive;
+    private Set<Integer> output=Collections.emptySet(),media=Collections.emptySet(),assistant=Collections.emptySet();
     PlaybackActivity(Source source,Listener listener){this.source=source;this.listener=listener;}
-    synchronized void start(){start(false);}
-    private void start(boolean keepSpeech){
-        if(started||disabled)return;started=true;outputActive=false;mediaActive=false;speechActive=keepSpeech;final long token=++epoch;
+    synchronized void start(){start(false,false);}
+    private void start(boolean keepSpeech,boolean keepAssistant){
+        if(started||disabled)return;started=true;outputActive=false;mediaActive=false;speechActive=keepSpeech;assistantActive=keepAssistant;final long token=++epoch;
         try{source.start(new Observer(){public void update(Snapshot value){accept(token,value);}public void failed(String detail){fail(token,detail);}});}
         catch(Exception e){fail(token,e.toString());}catch(LinkageError e){fail(token,e.toString());}
     }
     private void accept(long token,Snapshot value){
-        boolean newMedia=false;
+        boolean newMedia=false,newAssistant=false;
         synchronized(this){if(!started||token!=epoch)return;
-            if(known)for(Integer id:value.media)if(!media.contains(id)){newMedia=true;break;}
-            known=true;output=value.output;media=value.media;outputActive=!output.isEmpty();mediaActive=!media.isEmpty();speechActive=!value.speech.isEmpty();
+            if(known){
+                for(Integer id:value.media)if(!media.contains(id)){newMedia=true;break;}
+                for(Integer id:value.assistant)if(!assistant.contains(id)){newAssistant=true;assistantStarts++;break;}
+            }
+            known=true;output=value.output;media=value.media;assistant=value.assistant;outputActive=!output.isEmpty();mediaActive=!media.isEmpty();speechActive=!value.speech.isEmpty();assistantActive=!value.assistant.isEmpty();
         }
-        listener.changed(token,newMedia);
+        listener.changed(token,newMedia,newAssistant);
     }
     private void fail(long token,String detail){
         final long failedEpoch;
-        synchronized(this){if(!started||token!=epoch)return;disabled=true;known=false;started=false;failedEpoch=++epoch;output=Collections.emptySet();media=Collections.emptySet();outputActive=true;mediaActive=true;speechActive=false;try{source.close();}catch(RuntimeException ignored){}}
+        synchronized(this){if(!started||token!=epoch)return;disabled=true;known=false;started=false;failedEpoch=++epoch;output=Collections.emptySet();media=Collections.emptySet();assistant=Collections.emptySet();outputActive=true;mediaActive=true;speechActive=false;assistantActive=false;try{source.close();}catch(RuntimeException ignored){}}
         listener.degraded(failedEpoch,detail);
     }
     // When this optional platform API is unavailable, basic PCM remains usable.
     boolean outputActive(){return outputActive;}
     boolean mediaActive(){return mediaActive;}
     boolean speechActive(){return speechActive;}
+    boolean assistantActive(){return assistantActive;}
+    long assistantStartSequence(){return assistantStarts;}
     synchronized boolean known(){return known;}
     synchronized boolean current(long token){return started&&token==epoch;}
     synchronized boolean sameEpoch(long token){return token==epoch;}
@@ -55,9 +73,9 @@ final class PlaybackActivity {
         // HU MUSIC pause changes only the media lane. Preserve the last confirmed
         // speech state while the new asynchronous baseline is pending; its first
         // snapshot (or a failure) replaces this state. Old callbacks remain fenced.
-        boolean keepSpeech=speechActive;close();start(keepSpeech);
+        boolean keepSpeech=speechActive,keepAssistant=assistantActive;close();start(keepSpeech,keepAssistant);
     }
-    synchronized void close(){started=false;known=false;disabled=false;epoch++;output=Collections.emptySet();media=Collections.emptySet();outputActive=true;mediaActive=true;speechActive=false;try{source.close();}catch(RuntimeException ignored){}}
+    synchronized void close(){started=false;known=false;disabled=false;epoch++;output=Collections.emptySet();media=Collections.emptySet();assistant=Collections.emptySet();outputActive=true;mediaActive=true;speechActive=false;assistantActive=false;try{source.close();}catch(RuntimeException ignored){}}
 
     /** The existing privileged app_process uses platform playback callbacks, with no APK or policy. */
     static final class AndroidSource implements Source {
@@ -82,17 +100,17 @@ final class PlaybackActivity {
             return snapshot(manager.getActivePlaybackConfigurations());
         }
         private Snapshot snapshot(List<AudioPlaybackConfiguration> configs)throws Exception{
-            Set<Integer> output=new HashSet<Integer>(),media=new HashSet<Integer>();
+            Set<Integer> output=new HashSet<Integer>(),media=new HashSet<Integer>(),speech=new HashSet<Integer>(),assistant=new HashSet<Integer>();
             for(AudioPlaybackConfiguration config:configs){
                 if(!((Boolean)active.invoke(config)).booleanValue())continue;
                 int usage=config.getAudioAttributes().getUsage();
                 boolean music=AudioUsage.isMedia(usage);
-                if(!music&&!AudioUsage.isSpeech(usage))continue;
+                if(!music&&!AudioUsage.isSpeech(usage)&&!AudioUsage.isAssistant(usage))continue;
                 int id=((Integer)playerId.invoke(config)).intValue();
                 if(id<=0)throw new IOException("playback player identity unavailable");
-                output.add(id);if(music)media.add(id);
+                output.add(id);if(music)media.add(id);else if(AudioUsage.isSpeech(usage))speech.add(id);else assistant.add(id);
             }
-            return new Snapshot(output,media);
+            return new Snapshot(output,media,speech,assistant);
         }
         public synchronized void close(){
             AudioManager old=manager;AudioManager.AudioPlaybackCallback cb=callback;HandlerThread worker=thread;

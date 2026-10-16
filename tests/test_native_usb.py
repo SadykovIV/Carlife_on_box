@@ -440,6 +440,111 @@ class NativeUSBTests(unittest.TestCase):
                 self.assertEqual(audio["errors"], 0)
                 self.assertFalse(client.summary()["workers_alive"])
 
+    def test_native_stop_accepts_complete_boundary_when_call_pcm_continues(self):
+        # Call PCM intentionally survives MusicPause. Every PCM frame arrives in
+        # two reads; close must consume its tail rather than discard a prefix.
+        class Handle:
+            def __init__(self):
+                self.cancel = threading.Event()
+                self.parser = FrameParser()
+                self.incoming = queue.Queue()
+                self.active = False
+                self.tail = None
+                self.frames = 0
+                self.closed_with_partial_frame = None
+                self.sent = []
+
+            def read(self, capacity, timeout):
+                if self.tail is not None:
+                    result, self.tail = self.tail, None
+                    return result
+                try:
+                    return self.incoming.get(timeout=min(timeout, .01))
+                except queue.Empty:
+                    if self.cancel.is_set():
+                        raise InterruptedError("cancel")
+                    if self.active:
+                        self.frames += 1
+                        wire = Packet(MEDIA, MEDIA_DATA, b"\x01\x00" * 1920, self.frames * 20).encode()
+                        self.tail = wire[8:]
+                        return wire[:8]
+                    raise TimeoutError("idle")
+
+            def write(self, data, timeout):
+                for packet in self.parser.feed(data):
+                    self.sent.append(packet.message)
+                    replies = []
+                    if packet.message == HU_VERSION:
+                        replies = [Packet(CMD, VERSION_MATCH, protobuf(f1=1)),
+                                   Packet(CMD, MD_INFO, protobuf(f15=NATIVE_MEDIACODEC_AU_MARKER))]
+                    elif packet.message == VIDEO_INIT:
+                        replies = [Packet(CMD, VIDEO_INIT_DONE, protobuf(f1=1280, f2=720, f3=30))]
+                    elif packet.message == VIDEO_START:
+                        replies = [Packet(MEDIA, MEDIA_INIT, protobuf(f1=48000, f2=2, f3=16))]
+                        self.active = True
+                    elif packet.message == VIDEO_PAUSE:
+                        # Native pause keepalive is not an encoded access unit.
+                        replies = [Packet(VIDEO, VIDEO_DATA, b"")]
+                    for reply in replies:
+                        self.incoming.put(reply.encode())
+                return len(data)
+
+            def close(self):
+                self.closed_with_partial_frame = self.tail is not None
+                self.cancel.set()
+
+        handle = Handle()
+        owner = open(self.root / "live-call-lock", "a+")
+        stream = USBStream(SimpleNamespace(close=lambda: None), handle, owner, {})
+        client = HUClient("direct-usb", 0, self.root / "live-call", backend="DIRECT_USB_AOA",
+                          transport_factory=lambda: stream)
+        self.addCleanup(client.stop)
+        with patch.object(client, "_decoder", lambda: client.media.get()):
+            client.start()
+        deadline = time.monotonic() + 2
+        while client.audio.summary()["lanes"]["MEDIA"]["data_packets"] < 3 and time.monotonic() < deadline:
+            time.sleep(.005)
+        self.assertIsNone(client.error)
+        client.stop()
+        self.assertIsNone(client.error)
+        self.assertIn(PAUSE_MEDIA, handle.sent)
+        self.assertIn(VIDEO_PAUSE, handle.sent)
+        self.assertFalse(handle.closed_with_partial_frame)
+        self.assertEqual(client.framing_pending_bytes, 0)
+        drain = client.native_shutdown_drain
+        self.assertTrue(drain["complete_frame_boundary"])
+        self.assertFalse(drain["quiescent"], "continuing call PCM is not silence")
+        self.assertEqual(drain["boundary_reason"], "live_audio_frame_boundary")
+        self.assertGreaterEqual(drain["continuing_audio_packets"], 4)
+        self.assertEqual(drain["transport_pending_bytes"], 0)
+        self.assertGreaterEqual(drain["elapsed_seconds"], .2)
+        self.assertLess(drain["elapsed_seconds"], 3.5)
+        self.assertFalse(client.summary()["workers_alive"])
+
+    def test_live_audio_close_never_accepts_parser_or_transport_tail(self):
+        client = HUClient("direct-usb", 0, self.root / "live-boundary", backend="DIRECT_USB_AOA",
+                          transport_factory=lambda: None)
+        try:
+            client.session.state = "PAUSED"
+            client.native_drain_since = 100
+            client.native_drain_audio_packets = 10
+            client.native_drain_last_audio_ns = 100_990_000_000
+            client.last_progress_ns["usb_bulk_read_bytes"] = 100_990_000_000
+            client.sock = SimpleNamespace(pending=bytearray(b"partial transport tail"))
+            with patch("hu_lab.client.time.monotonic", return_value=101):
+                self.assertFalse(client._native_rx_boundary_ready(0))
+                client.sock.pending.clear()
+                self.assertFalse(client._native_rx_boundary_ready(3))
+                client.commands.put_nowait(Packet(CMD, VIDEO_PAUSE))
+                self.assertFalse(client._native_rx_boundary_ready(0), "close controls still pending")
+                client.commands.get_nowait()
+                client.commands.task_done()
+                self.assertTrue(client._native_rx_boundary_ready(0))
+                self.assertEqual(client.native_shutdown_boundary_reason, "live_audio_frame_boundary")
+        finally:
+            client.sock = None
+            client.stop()
+
     def test_native_marker_cannot_masquerade_as_dev_and_vice_versa(self):
         for backend, marker in (("DIRECT_USB_AOA", MEDIACODEC_AU_MARKER),
                                 ("DEV_STREAM_OVER_ADB", NATIVE_MEDIACODEC_AU_MARKER)):
@@ -498,6 +603,10 @@ class NativeUSBTests(unittest.TestCase):
                 self.assertFalse(client._native_rx_boundary_ready(0))
             with patch("hu_lab.client.time.monotonic", return_value=102):
                 self.assertFalse(client._native_rx_boundary_ready(3))
+                client.commands.put_nowait(Packet(CMD, VIDEO_PAUSE))
+                self.assertFalse(client._native_rx_boundary_ready(0), "quiet RX does not prove TX is complete")
+                client.commands.get_nowait()
+                client.commands.task_done()
                 self.assertTrue(client._native_rx_boundary_ready(0))
         finally:
             client.stop()

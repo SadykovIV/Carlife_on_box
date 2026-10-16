@@ -1,5 +1,6 @@
 #!/system/bin/sh
-# Add only the CarLife init overlay to THIS device's saved Magisk boot.
+# Add the CarLife init overlay and the recognized TBox serial-console fix to
+# THIS device's saved Magisk boot. Unknown console profiles remain unchanged.
 # Contract: patch-boot.sh STATE_DIR MODULE_DIR BOOT_SIZE. No block-device I/O.
 # Magisk v30.7: native/src/boot/{cli.rs,cpio.rs,bootimg.cpp}.
 set -eu
@@ -110,6 +111,64 @@ layout() {
     fi
     printf 'HEADER_VERSION=%s\nPAGE_SIZE=%s\nCOMPONENT_END=%s\n' "$ver" "$page" "$end" > "$out/layout.txt"
 }
+# BEGIN_REVIEWED_CONSOLE_PROFILE
+# The whole kernel and DTB hashes identify the already accepted TBox profile.
+# Header/DTB are checked as a pair before changing either. In particular, never
+# remove arbitrary console/earlycon arguments from another vendor's boot image.
+prepare_console_profile() {
+    CONSOLE_RESULT=CONSOLE_UNCHANGED_UNRECOGNIZED
+    REPACK_SOURCE=$D/original.img
+    cp "$W/before/header.masked" "$W/expected.header.masked"
+    if [ -e "$W/before/dtb" ]; then cp "$W/before/dtb" "$W/expected.dtb"; fi
+    regular "$W/before/kernel" && regular "$W/before/dtb" || return 0
+    [ "$(u32 "$W/before/header.raw" 40)" = 2 ] || return 0
+    [ "$(hash "$W/before/kernel")" = 12f4f4aa1df602972e47fcb159354c32c83aca96d714ba702e7ed355fa4ddac0 ] || return 0
+    cp_dtb_sha=$(hash "$W/before/dtb")
+    case "$cp_dtb_sha" in
+        7a49a4bb2c7d392af572ec00c582ceb1e200f24d832153b7b9781866bbce8210) cp_dtb_state=old;;
+        38c946579a47a5b8b4e6b4237b16aaa6ffe0fac0e5a079c4ff4161f6aefee89a) cp_dtb_state=new;;
+        *) return 0;;
+    esac
+    cp_old_head='console=ttyMSM0,115200,n8 earlycon=msm_geni_serial,0x888000 androidboot.hardware=qcom androidboot.console=ttyMSM0 androidboot.memcg=1 lpm_levels.sleep_disabled=1 video=vfb:640x400,bpp=32,memsize=3072000 msm_rtb.filter=0x237 service_locator.enable=1 androidboot.usbcontroller=a600000.dwc3 swiotlb=2048 cgroup.memory=nokmem,nosocket loop.max_part=7 buildvariant=user'
+    cp_new_head='console=null androidboot.hardware=qcom androidboot.serialconsole=0 androidboot.memcg=1 lpm_levels.sleep_disabled=1 video=vfb:640x400,bpp=32,memsize=3072000 msm_rtb.filter=0x237 service_locator.enable=1 androidboot.usbcontroller=a600000.dwc3 swiotlb=2048 cgroup.memory=nokmem,nosocket loop.max_part=7 buildvariant=user'
+    { printf '%s' "$cp_old_head"; head -c "$((512 - ${#cp_old_head}))" /dev/zero; } > "$W/console-head.old"
+    { printf '%s' "$cp_new_head"; head -c "$((512 - ${#cp_new_head}))" /dev/zero; } > "$W/console-head.new"
+    slice "$W/before/header.raw" 64 512 "$W/console-head.actual"
+    slice "$W/before/header.raw" 608 1024 "$W/console-extra.actual"
+    head -c 1024 /dev/zero > "$W/console-extra.zero"
+    cmp -s "$W/console-extra.actual" "$W/console-extra.zero" || return 0
+    if cmp -s "$W/console-head.actual" "$W/console-head.old"; then cp_head_state=old
+    elif cmp -s "$W/console-head.actual" "$W/console-head.new"; then cp_head_state=new
+    else return 0; fi
+    if [ "$cp_dtb_state" = old ]; then
+        # These offsets are within the full-hash-pinned DTB component, not the
+        # boot image. Replace only the two reviewed /chosen/bootargs values.
+        cp_old_dt='rcupdate.rcu_expedited=1 rcu_nocbs=0-7 earlycon=msm_geni_serial,0x98c000 kpti=off'
+        cp_new_dt='rcupdate.rcu_expedited=1 rcu_nocbs=0-7                                   kpti=off'
+        printf '%s\000' "$cp_old_dt" > "$W/console-dt.old"
+        printf '%s\000' "$cp_new_dt" > "$W/console-dt.new"
+        [ "$(bytes "$W/console-dt.old")" = 82 ] && [ "$(bytes "$W/console-dt.new")" = 82 ] || fail 'console DT replacement size'
+        for cp_offset in 5352 398805; do
+            slice "$W/before/dtb" "$cp_offset" 82 "$W/console-dt.actual"
+            cmp -s "$W/console-dt.actual" "$W/console-dt.old" || fail 'pinned console DT bytes differ'
+            dd if="$W/console-dt.new" of="$W/expected.dtb" bs=1 seek="$cp_offset" count=82 conv=notrunc 2>/dev/null
+        done
+        [ "$(hash "$W/expected.dtb")" = 38c946579a47a5b8b4e6b4237b16aaa6ffe0fac0e5a079c4ff4161f6aefee89a ] || fail 'console DT result hash'
+    fi
+    # Give repack a private template with the normalized header. Magiskboot
+    # recomputes the boot SHA1 from the changed ramdisk/DTB. original.img, kernel,
+    # vbmeta, AVB flags and every unrelated command-line byte remain untouched.
+    if [ "$cp_head_state" = old ]; then
+        cp "$D/original.img" "$W/console-template.img"
+        dd if="$W/console-head.new" of="$W/console-template.img" bs=1 seek=64 count=512 conv=notrunc 2>/dev/null
+        dd if="$W/console-head.new" of="$W/expected.header.masked" bs=1 seek=64 count=512 conv=notrunc 2>/dev/null
+        REPACK_SOURCE=$W/console-template.img
+    fi
+    cp "$W/expected.dtb" "$W/repack/dtb"
+    if [ "$cp_head_state:$cp_dtb_state" = new:new ]; then CONSOLE_RESULT=CONSOLE_OFF_ALREADY_APPLIED
+    else CONSOLE_RESULT=CONSOLE_OFF_APPLIED; fi
+}
+# END_REVIEWED_CONSOLE_PROFILE
 layout "$D/original.img" "$W/before"
 (cd "$W/before" && run unpack -n "$D/original.img") || fail 'unpack original'
 regular "$W/before/ramdisk.cpio" || fail 'ramdisk absent'
@@ -186,16 +245,22 @@ for file in carlife-owner.rc carlife-early-dispatch.sh carlife-native-entry.sh c
     if run cpio "$W/original.cpio" "exists $target"; then fail 'CarLife overlay target already exists'; fi
     run cpio "$W/repack/ramdisk.cpio" "add $mode $target $M/hooks/$file" || fail 'add hook'
 done
-# Retain raw compressed kernel and all other original components. Only the
-# ramdisk is decompressed/recompressed; no editable header file is supplied.
+# Retain raw compressed kernel and all other original components. The optional
+# exact console profile below normalizes only the reviewed header/DTB fields.
 for component in kernel kernel_dtb second extra recovery_dtbo dtb bootconfig; do
     if [ -e "$W/before/$component" ]; then cp "$W/before/$component" "$W/repack/$component"; fi
 done
-(cd "$W/repack" && run repack "$D/original.img" "$W/candidate.img") || fail 'repack'
+prepare_console_profile
+printf 'CONSOLE=%s\n' "$CONSOLE_RESULT" >&3
+(cd "$W/repack" && run repack "$REPACK_SOURCE" "$W/candidate.img") || fail 'repack'
 regular "$W/candidate.img" && [ "$(bytes "$W/candidate.img")" = "$SIZE" ] || fail 'candidate partition size'
 layout "$W/candidate.img" "$W/after"
 (cd "$W/after" && run unpack -n "$W/candidate.img") || fail 'unpack candidate'
-for component in header.masked footer.masked vbmeta kernel kernel_dtb second extra recovery_dtbo dtb bootconfig; do
+cmp -s "$W/expected.header.masked" "$W/after/header.masked" || fail 'changed header.masked beyond reviewed console profile'
+if [ -e "$W/expected.dtb" ]; then
+    cmp -s "$W/expected.dtb" "$W/after/dtb" || fail 'changed dtb beyond reviewed console profile'
+else [ ! -e "$W/after/dtb" ] || fail 'added dtb'; fi
+for component in footer.masked vbmeta kernel kernel_dtb second extra recovery_dtbo bootconfig; do
     if [ -e "$W/before/$component" ]; then
         cmp -s "$W/before/$component" "$W/after/$component" || fail "changed $component"
     else [ ! -e "$W/after/$component" ] || fail "added $component"; fi

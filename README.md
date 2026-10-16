@@ -1,5 +1,7 @@
 # Baidu CarLife on Android Box
 
+**THIS BUILD HAS NOT BEEN TESTED WITH AN AUTOMOTIVE HEAD UNIT.** This is a prerelease for testing; earlier Honda results do not establish acceptance of this build.
+
 **Carlife_on_box** adds a native Baidu CarLife mobile-device backend to an Android box: the box projects its own Android launcher and applications to a CarLife head unit over USB, and receives touch and navigation input through CarLife.
 
 **English** · [Русский](README.ru.md)
@@ -22,36 +24,34 @@ A fresh system integration seeds **Baidu CarLife** as the default. A later owner
 
 | Area | Status |
 | --- | --- |
-| Reference native runtime | Tested on the development box with a Honda head unit |
+| Reference native runtime | Earlier baseline tested on the development box with Honda; this prerelease tested with Mac HU only |
 | Full integrated OTA candidate | Built and checked offline; **not installed or boot-tested** |
 | Other Android boxes | Require a device profile and hardware validation |
-| Audio | r6 USB PCM verified with Mac HU; audible music/navigation ducking confirmed on Honda with the earlier audio candidate; final r6 Honda recheck pending |
-| Separate TTS, microphone and metadata | Native service registration verified; independent Yandex TTS, HU microphone recognition and metadata display still need application/HU acceptance |
+| Audio | USB MEDIA/TTS/VR, application microphone injection and synthetic duplex call audio checked on Mac; automotive acceptance of this build pending |
+| Native services | USB-only call audio integrated, without a Bluetooth dependency. Physical HU microphone, steering voice, cluster rendering and real SIM/VoIP calls still need acceptance; [current status](docs/CARLIFE_SERVICES_STATUS.md) |
 | Phone verification | Native v2 checksum candidate passes offline tests; legacy RSA and media encryption remain unsupported |
 | Honda multitouch | Packet support exists; independent second-finger coordinates were not obtained in the tested mode |
 | Hardware RESET mode switching | Button event and CarPlay dialog verified; actual switch and a three-mode cycle not verified/implemented |
 | Enforcing SELinux deployment | Not validated; the development firmware was already permissive |
 | Latency | Bounded native AU queue and adaptive bitrate implemented; actual end-to-end improvement remains unmeasured |
 
-The source repository contains project code, build tools and tests. Optional r7 release assets also include the exact supported OEM application overlay; those third-party binaries are separate from Apache-2.0 source. Full OTA images and signing keys are not distributed. Building a JAR successfully does not establish compatibility with a new device or head unit.
+The source repository contains project code, build tools and tests. The package includes the exact supported OEM application overlay; those third-party binaries are separate from Apache-2.0 source. Full OTA images and signing keys are not distributed. Building a JAR successfully does not establish compatibility with a new device or head unit.
 
-[Current native services/video candidate](docs/NATIVE_CANDIDATE.md) describes implementation, remaining hardware checks and reproducible builds. The [HeadSwap review](docs/HEADSWAP_LESSONS.md) preserves the earlier findings.
-
-Already running a manually integrated native CarLife installation? The [Magisk runtime update](docs/MAGISK_RUNTIME_UPDATE.md) retains its existing boot integration. Installations created by the first-install package use that package again for updates.
-
-[Download r6 test release](https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.15-r6): first-install ZIP for compatible TBox Ultra 1 firmware, separate legacy runtime update/rollback ZIPs and SHA256 checksums. Follow the short [installation and rollback guide](docs/INSTALL_RELEASE.md) ([Русский](docs/ru/INSTALL_RELEASE.md)) to choose the correct package.
+[Current service status](docs/CARLIFE_SERVICES_STATUS.md) separates implemented audio/voice/navigation/USB call paths from device and HU acceptance. The [r6/mic-test4 record](docs/NATIVE_CANDIDATE.md) and [HeadSwap review](docs/HEADSWAP_LESSONS.md) retain earlier results.
 
 ## Start here
 
-[Download r7 video settings](https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.15-r7): resolution/FPS selection beside Baidu CarLife, defaulting to the head unit request. Use the [r7 update and rollback guide](docs/INSTALL_VIDEO_SETTINGS.md) for existing supported OEM integrations. The separate r6 first-install family remains available above. [Video settings details](docs/en/VIDEO_SETTINGS.md).
+The current [prerelease](<https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.16-usb-call-lab2>) provides **`Carlife_on_box-TBox-Ultra-2026.10.16-usb-call-lab2.zip`**: one Magisk file for compatible TBox Ultra initial installation or update, including OEM protocol and resolution/FPS settings. Fresh defaults are Baidu CarLife and **Requested by head unit**; updates preserve choices. Rollback is included on-device. See the [short installation/rollback guide](docs/INSTALL_RELEASE.md) and [detailed installer guide](docs/MAGISK_INSTALLER.md). Clean installation on a second physical box remains unverified.
 
-For compatible TBox Ultra 1 firmware, the [Magisk installer](docs/MAGISK_INSTALLER.md) uses one ZIP and saves and patches each box's own boot during installation, without extracting it in advance or replacing the full firmware. Runtime updates and exact rollback are included. Offline checks pass; hardware acceptance on a second box is still pending.
+This build connects the USB call-audio path to the live session, handles mute/unmute and return to music, and removes repeated music-status commands from every PCM packet. **56 JVM test suites and 133 host tests passed.** Mac tests exercised generated duplex audio, native RESET and session reconnection during active audio. These are synthetic local tests, not real SIM/VoIP calls or automotive microphone tests.
+
+Older [r6](https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.15-r6) and [r7](https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.15-r7) remain historical releases; their separate ZIP workflows do not apply to the current combined package. [Video settings details](docs/en/VIDEO_SETTINGS.md).
 
 1. [Build the Android MD](docs/BUILD_MD.md) — shared source + native USB overlay, JVM tests and a DEX JAR.
 2. [Build the runtime and system overlay](docs/BUILD_RUNTIME.md) — observer, selector service and exact SM6350 integration.
 3. [Port to another Android box](docs/PORTING.md) — locate its early projection owner and adapt USB, video, input, permissions and selection.
 4. [Run the Mac/Linux HU lab](docs/HU_LAB.md) — native USB test head unit, development TCP transport and packet replay.
-5. [Audio candidate and HeadSwap review](docs/AUDIO_CANDIDATE.md) — source changes, startup findings and hardware plan.
+5. [Current service status](docs/CARLIFE_SERVICES_STATUS.md) — audio, assistant, navigation and calls; implementation and acceptance boundaries.
 6. [Read the validation record](docs/STATUS.md) — what was tested and what remains unverified.
 
 For a dependency-light offline check (Python 3.11+, a C compiler):

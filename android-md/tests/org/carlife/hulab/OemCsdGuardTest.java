@@ -26,6 +26,28 @@ public final class OemCsdGuardTest{
   ByteArrayOutputStream conflictingInband=new ByteArrayOutputStream();conflictingInband.write(raw1080);conflictingInband.write(new byte[]{0,0,0,1,0x65,(byte)0xb8});
   rejects(()->fullHd.accept(conflictingInband.toByteArray(),12351,1));
   rejects(()->new AvcAccessUnits(true).addFormatCsd(format1080));
+  // Exact failed r7 720p60 runtime pair: Level3.2 is required by 216000 MBPS.
+  byte[]format60=HexFixture.read(Paths.get("android-md/tests/fixtures/mode-qcom-captured-1280x720-60-l32.csd"));
+  byte[]raw60=HexFixture.read(Paths.get("android-md/tests/fixtures/mode-qcom-captured-1280x720-60-l32.raw-config"));
+  byte[]format60Before=format60.clone(),raw60Before=raw60.clone();
+  VideoMode mode60=VideoMode.of(1280,720,60);check(mode60.levelIdc==32,"720p60 requests Level3.2");
+  AvcAccessUnits sixty=new AvcAccessUnits(true,mode60);sixty.addFormatCsd(format60);
+  check(sixty.accept(raw60,0,2)==null&&sixty.guardedConfigs()==1,"captured720p60 raw config admitted after mode validation");
+  byte[]slice60=new byte[]{0,0,0,1,0x65,(byte)0xb8};
+  ByteArrayOutputStream expected60=new ByteArrayOutputStream();expected60.write(format60);expected60.write(slice60);
+  AvcAccessUnits.Au sixtyAu=sixty.accept(slice60,987654321L,1);
+  check(Arrays.equals(sixtyAu.bytes,expected60.toByteArray()),"captured Level32 SPS/PPS emitted byte-identically");
+  check(sixtyAu.ptsUs==987654321L&&sixtyAu.idr,"720p60 adapter preserves PTS and IDR");
+  check(Arrays.equals(format60,format60Before)&&Arrays.equals(raw60,raw60Before),"720p60 input CSD remains unchanged");
+  // Changed profile, constraints, SPS payload, PPS type/body all remain invalid.
+  for(int index:new int[]{5,6,8,14,19,21,22}){byte[]other=raw60.clone();other[index]^=1;rejects(()->sixty.accept(other,0,2));}
+  byte[]wrongRaw60=raw60.clone();wrongRaw60[7]=11;rejects(()->sixty.accept(wrongRaw60,0,2));
+  rejects(()->new AvcAccessUnits(true).addFormatCsd(format60));
+  rejects(()->new AvcAccessUnits(true,VideoMode.of(1280,720,30)).addFormatCsd(format60));
+  rejects(()->new AvcAccessUnits(true,VideoMode.of(1728,648,30)).addFormatCsd(format60));
+  rejects(()->new AvcAccessUnits(true,mode60).accept(raw60,0,2));
+  ByteArrayOutputStream inband60=new ByteArrayOutputStream();inband60.write(raw60);inband60.write(slice60);
+  rejects(()->sixty.accept(inband60.toByteArray(),987670988L,1));
   System.out.println("PASS "+n+" OEM CSD source-selection guard checks; no NAL byte editing");
  }
 }

@@ -1,6 +1,6 @@
 # Validation record
 
-Current candidate: 43 JVM suites, 97 host HU tests and 12 runtime-option tests PASS. DEX/runtime built; device unavailable, no installation. Split audio, metadata, Yandex notifications, HU microphone and video queue/FPS/modes are implemented offline. [Current details](NATIVE_CANDIDATE.md). The records below describe earlier revisions.
+Current prerelease **2026.10.16-usb-call-lab2** is installed on the development box and passed scoped Mac direct-USB checks, 56 MD JVM suites and 133 host tests. **This exact build has not been tested with an automotive head unit.** Real HU microphone and SIM/VoIP calls remain unverified. See [current results](CARLIFE_SERVICES_STATUS.md). The records and plans below describe earlier revisions.
 
 [Русский](ru/STATUS.md) · [Home](../README.md)
 
@@ -42,7 +42,7 @@ A complete local candidate was built from the exact reference firmware. All ten 
 
 The candidate is not included here. Releasing a source integration is not a claim that its full image is ready to flash on another TBox.
 
-## Remaining work, in priority order
+## Historical next-step plan
 
 1. Test audible native MEDIA on the car HU and validate player pause/resume for radio transitions.
 2. Separate music and spoken prompts (MEDIA + TTS), then integrate real Yandex maneuvers and HU microphone/assistant input. These are independent development tasks, not prerequisites for ordinary sound.

@@ -425,6 +425,9 @@ class HUClient:
         self.native_stale_media_packets = 0
         self.native_stale_media_bytes = 0
         self.native_drain_since = None
+        self.native_drain_audio_packets = 0
+        self.native_drain_last_audio_ns = None
+        self.native_shutdown_boundary_reason = None
         self.native_rx_quiescent = threading.Event()
         self.native_shutdown_drain = None
 
@@ -588,6 +591,10 @@ class HUClient:
                     self.trace.wire("rx", packet.encode())
                     self.trace.packet("rx", packet)
                     self._receive_packet(packet, video, received_ns=time.monotonic_ns())
+                    if (self.native_drain_since is not None and packet.channel in (MEDIA, TTS, VR)
+                            and packet.message in (0x30006, 0x40003, 0x50003) and packet.payload):
+                        self.native_drain_audio_packets += 1
+                        self.native_drain_last_audio_ns = time.monotonic_ns()
 
     def _receive_packet(self, packet, video, received_ns=None):
         with self.state_lock:
@@ -595,7 +602,7 @@ class HUClient:
             received_ns = received_ns or time.monotonic_ns()
             if (self.backend == "DIRECT_USB_AOA" and self.session.state == "WAIT_VERSION" and
                     ((packet.channel == VIDEO and packet.message in (VIDEO_DATA, VIDEO_HEARTBEAT))
-                     or packet.channel in (MEDIA, TTS))):
+                     or packet.channel in (MEDIA, TTS, VR))):
                 # Releasing a libusb interface is not a USB detach. A prior
                 # PAUSE/closed HU may leave complete old media in the endpoint.
                 # Discard only framed media before the fresh VERSION_MATCH.
@@ -1124,16 +1131,35 @@ class HUClient:
                 "workers_alive": [t.name for t in self.threads + ([self.png_thread] if self.png_thread else []) + [self.trace.writer] if t.is_alive()]}
 
     def _native_rx_boundary_ready(self, pending_bytes):
-        if self.backend != "DIRECT_USB_AOA" or self.native_drain_since is None or pending_bytes:
+        if (self.backend != "DIRECT_USB_AOA" or self.native_drain_since is None or pending_bytes
+                or len(getattr(self.sock, "pending", b"")) or self.commands.unfinished_tasks):
             return False
+        now = time.monotonic()
         last_rx_ns = self.last_progress_ns.get("usb_bulk_read_bytes")
         since = max(self.native_drain_since, (last_rx_ns / 1e9) if last_rx_ns else self.native_drain_since)
-        return time.monotonic() - since >= .2
+        if now - since >= .2:
+            self.native_shutdown_boundary_reason = "quiet"
+            return True
+        # MusicPause does not terminate an active Android call. After the close
+        # controls are written, continuing PCM may never provide 200ms of silence.
+        # Retire the reader only after complete frames and an empty transport tail;
+        # unread endpoint data then starts with the next whole protocol frame.
+        # The next native VERSION handshake already discards bounded old media.
+        if (self.session.state == "PAUSED"
+                and now - self.native_drain_since >= .2 and self.native_drain_audio_packets >= 4
+                and self.native_drain_last_audio_ns is not None
+                and now - self.native_drain_last_audio_ns / 1e9 <= .1):
+            self.native_shutdown_boundary_reason = "live_audio_frame_boundary"
+            return True
+        return False
 
     def _drain_native_before_close(self):
         if self.backend != "DIRECT_USB_AOA" or not self.sock or self.halt.is_set():
             return
         started = time.monotonic()
+        self.native_drain_audio_packets = 0
+        self.native_drain_last_audio_ns = None
+        self.native_shutdown_boundary_reason = None
         self.native_drain_since = started
         deadline = started + 3.5
         while not self.halt.is_set() and not self.native_rx_quiescent.is_set():
@@ -1141,7 +1167,12 @@ class HUClient:
             if remaining <= 0:
                 break
             self.native_rx_quiescent.wait(min(.05, remaining))
-        self.native_shutdown_drain = {"quiescent": self.native_rx_quiescent.is_set(),
+        self.native_shutdown_drain = {"quiescent": self.native_rx_quiescent.is_set() and self.native_shutdown_boundary_reason == "quiet",
+            "complete_frame_boundary": self.native_rx_quiescent.is_set(),
+            "boundary_reason": self.native_shutdown_boundary_reason,
+            "continuing_audio_packets": self.native_drain_audio_packets,
+            "transport_pending_bytes": len(getattr(self.sock, "pending", b"")),
+            "pending_tx_commands": self.commands.unfinished_tasks,
             "elapsed_seconds": time.monotonic() - started, "deadline_seconds": 3.5,
             "quiet_minimum_ms": 200, "framing_pending_bytes": self.framing_pending_bytes,
             "scope": "logical HU disconnect, not USB detach"}

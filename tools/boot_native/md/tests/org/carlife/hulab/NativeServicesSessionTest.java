@@ -41,8 +41,7 @@ public final class NativeServicesSessionTest {
         current.audioWireActive=true;current.audioHuMuted=true;
         current.speechWireActive=true;
         current.services=new NativeServices(null);
-        Field voiceField=NativeServices.class.getDeclaredField("voice");voiceField.setAccessible(true);Object voice=voiceField.get(current.services);
-        Field activeField=NativeVoice.class.getDeclaredField("active");activeField.setAccessible(true);activeField.setBoolean(voice,true);
+        state(current.services).voiceModule(true,true);state(current.services).poll();
         try{current.writer=new Thread(new Runnable(){public void run(){current.writeLoop();}});current.writer.start();await(snapshot,0x10026);
             check(Arrays.equals(frames(snapshot).get(0).payload,NativeSessionProtocol.initialModules(true,false,true)),"late snapshot sees current TTS/VR and muted MEDIA");
         }finally{current.close();if(current.writer!=null)current.writer.join(1000);}

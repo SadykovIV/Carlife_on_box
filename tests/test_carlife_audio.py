@@ -7,16 +7,43 @@ import wave
 
 from hu_lab.audio import (AudioReceiver, BoundedWavCapture, PcmFormat,
     MEDIA_INIT, MEDIA_DATA, MEDIA_PAUSE, MEDIA_RESUME, MEDIA_STOP,
-    TTS_INIT, TTS_DATA, TTS_STOP)
-from hu_lab.protocol import Packet, FrameParser, MEDIA, TTS, VIDEO, VIDEO_HEARTBEAT, protobuf, ProtocolError
+    TTS_INIT, TTS_DATA, TTS_STOP, VR_INIT, VR_DATA, VR_STOP)
+from hu_lab.protocol import Packet, FrameParser, MEDIA, TTS, VR, VIDEO, VIDEO_HEARTBEAT, protobuf, ProtocolError
 
 
 def init(channel=MEDIA, rate=48000, channels=2, bits=16):
-    return Packet(channel, MEDIA_INIT if channel == MEDIA else TTS_INIT,
+    return Packet(channel, {MEDIA: MEDIA_INIT, TTS: TTS_INIT, VR: VR_INIT}[channel],
                   protobuf(f1=rate, f2=channels, f3=bits))
 
 
 class AudioProtocolTest(unittest.TestCase):
+    def test_vr_output_is_distinct_from_microphone_and_other_lanes(self):
+        receiver = AudioReceiver()
+        receiver.receive(init())
+        receiver.receive(init(TTS, 16000, 1))
+        receiver.receive(init(VR, 16000, 1))
+        receiver.receive(Packet(VR, VR_DATA, b"\x01\x00" * 320, 123))
+        receiver.receive(Packet(VR, 0x58001, b"microphone input is not assistant output"))
+        receiver.receive(Packet(VR, VR_STOP))
+        lanes = receiver.summary()["lanes"]
+        self.assertEqual((lanes["VR"]["pcm_frames"], lanes["VR"]["state"]), (320, "STOPPED"))
+        self.assertEqual(lanes["VR"]["unknown_messages"], 1)
+        self.assertEqual((lanes["MEDIA"]["pcm_bytes"], lanes["TTS"]["pcm_bytes"]), (0, 0))
+        self.assertEqual(init(VR, 16000, 1).message, 0x50002)
+        receiver.close()
+
+    def test_vr_bad_init_and_stop_do_not_disable_tts(self):
+        receiver = AudioReceiver()
+        receiver.receive(init(TTS, 16000, 1))
+        receiver.receive(Packet(VR, VR_DATA, b"\x01\x00"))
+        receiver.receive(init(VR, 16000, 1))
+        receiver.receive(Packet(VR, VR_STOP, b"invalid"))
+        receiver.receive(Packet(TTS, TTS_DATA, b"\x02\x00"))
+        lanes = receiver.summary()["lanes"]
+        self.assertEqual(lanes["VR"]["errors"], 2)
+        self.assertEqual((lanes["TTS"]["errors"], lanes["TTS"]["pcm_frames"]), (0, 1))
+        receiver.close()
+
     def test_primary_schema_and_exact_outer_wire(self):
         self.assertEqual(init().payload.hex(), "0880f70210021810")
         self.assertEqual(init(TTS, 16000, 1).payload.hex(), "08807d10011810")

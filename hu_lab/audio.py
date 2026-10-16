@@ -10,12 +10,16 @@ import threading
 import time
 import wave
 
-from .protocol import MEDIA, TTS, ProtocolError, fields
+from .protocol import MEDIA, TTS, VR, ProtocolError, fields
 
 MEDIA_INIT, MEDIA_STOP, MEDIA_PAUSE = 0x30001, 0x30002, 0x30003
 MEDIA_RESUME, MEDIA_DATA = 0x30004, 0x30006
 TTS_INIT, TTS_STOP, TTS_DATA = 0x40001, 0x40002, 0x40003
-_NAMES = {MEDIA: "MEDIA", TTS: "TTS"}
+VR_INIT, VR_STOP, VR_DATA = 0x50002, 0x50004, 0x50003
+_NAMES = {MEDIA: "MEDIA", TTS: "TTS", VR: "VR"}
+_MESSAGES = {MEDIA: (MEDIA_INIT, MEDIA_DATA, MEDIA_STOP),
+             TTS: (TTS_INIT, TTS_DATA, TTS_STOP),
+             VR: (VR_INIT, VR_DATA, VR_STOP)}
 
 
 @dataclass(frozen=True)
@@ -180,7 +184,10 @@ class BoundedWavCapture:
 
 
 class AudioReceiver:
-    """MEDIA/TTS state is isolated from video; a valid INIT recovers a bad lane."""
+    """MEDIA/TTS/VR state is isolated from video; INIT recovers a bad lane.
+
+    VR here is MD assistant output, not HU microphone input (0x58001).
+    """
     def __init__(self, *, event=None, capture_directory=None, capture_limit_bytes=8 * 1024 * 1024):
         self.event = event or (lambda *args, **kwargs: None)
         self.lock = threading.RLock()
@@ -191,7 +198,7 @@ class AudioReceiver:
             "packets": 0, "data_packets": 0, "pcm_frames": 0, "pcm_bytes": 0,
             "non_silent_bytes": 0, "dropped_pcm_bytes": 0, "partial_discarded_bytes": 0,
             "errors": 0, "last_error": None, "last_timestamp_raw": None, "pending": b"",
-            "unknown_messages": 0} for channel in (MEDIA, TTS)}
+            "unknown_messages": 0} for channel in (MEDIA, TTS, VR)}
 
     def _discard_partial(self, lane):
         lane["partial_discarded_bytes"] += len(lane["pending"])
@@ -204,7 +211,7 @@ class AudioReceiver:
             lane = self.lanes[packet.channel]
             lane["packets"] += 1
             if self.closed:
-                if packet.message in (MEDIA_DATA, TTS_DATA):
+                if packet.message in (MEDIA_DATA, TTS_DATA, VR_DATA):
                     lane["dropped_pcm_bytes"] += len(packet.payload)
                 return True
             try:
@@ -219,9 +226,7 @@ class AudioReceiver:
             return True
 
     def _receive(self, lane, packet):
-        init = MEDIA_INIT if packet.channel == MEDIA else TTS_INIT
-        data_id = MEDIA_DATA if packet.channel == MEDIA else TTS_DATA
-        stop = MEDIA_STOP if packet.channel == MEDIA else TTS_STOP
+        init, data_id, stop = _MESSAGES[packet.channel]
         if packet.message == init:
             fmt = PcmFormat.parse(packet.payload)
             self._discard_partial(lane)

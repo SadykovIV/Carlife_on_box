@@ -221,5 +221,28 @@
       "mode-qcom-captured-1920x1080-l40.csd.hex": "50e6a53061a2ceda5dd508ca6ace73e53857545cdc73e0f762fe6f1cbddff251",
       "mode-qcom-captured-1920x1080-l40.raw-config.hex": "9f7409895090fe5eed407aaf025f50253269315be43cf1a3f8462892fb418f39"
     }
+  },
+  "captured_720p60": {
+    "origin": "Actual c2.qti.avc.encoder outputFormat CSD and BUFFER_FLAG_CODEC_CONFIG at 1280x720/60; r7 guard rejected Level32 overwrite before first AU",
+    "source_evidence": "research/runtime/r7-60fps-recovery-20261015T174119Z/before-runtime-logs.tar",
+    "source_sha256": "aa55395dc056dba359f787b97143bb4002f2ae41292abdb791ece66a764a7a66",
+    "source_member": "logs/md.1.jsonl",
+    "source_member_sha256": "4a983e62764f053f1e7c6a92e7bd509c7d6b7c5a8e95492b04655a8301ffa144",
+    "source_uptime_ms": {
+      "output_format": 134053,
+      "raw_config": 134058,
+      "guard_error": 134060
+    },
+    "library_sha256": "e1b2e80012ade83022614c36faf793d8c094a4421a5bb4818b9429ee1b81c1e6",
+    "width": 1280,
+    "height": 720,
+    "fps": 60,
+    "level_idc": 32,
+    "raw_config_diff": "Only SPS level_idc byte10 versus original outputFormat32; all other SPS bytes and PPS byte-identical",
+    "hash_semantics": "files SHA256 cover decoded hex bytes",
+    "files": {
+      "mode-qcom-captured-1280x720-60-l32.csd.hex": "9330f3f7b93a2a412198d9f6fb42077c4b40186fdedada5a360f91062be291f3",
+      "mode-qcom-captured-1280x720-60-l32.raw-config.hex": "80aa197e3d04be95223ed8bfffb2d8bd632287f965e1b5b610ccd8d513251721"
+    }
   }
 }
