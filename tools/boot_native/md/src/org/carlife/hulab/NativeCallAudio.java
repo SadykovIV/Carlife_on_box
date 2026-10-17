@@ -1,11 +1,15 @@
 package org.carlife.hulab;
 
 import android.media.AudioFormat;
+import android.media.AudioAttributes;
+import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 
 /**
  * Android call endpoint pair, owned by the USB call session worker.
@@ -146,6 +150,51 @@ final class NativeCallAudio implements AutoCloseable {
         CleanupUnconfirmedException(Throwable cause){super("platform endpoint release failed",cause);}
     }
 
+    /** This compatibility decision applies only to our already-authorized call injection track.
+     * The OEM Java wrapper suppresses every other package while sys.phonecall.state=1,
+     * including USAGE_CALL_ASSISTANT tracks created by the platform call API. */
+    static final class PstnStartCheck {
+        final int mode,state,playState,usage,flags,delayMs;
+        final boolean oemMethodsPresent,waiting,canPlay;
+        final String phoneState,phonePackage,callingPackage;
+        PstnStartCheck(int mode,int state,int playState,int usage,int flags,int delayMs,
+                boolean present,boolean waiting,boolean canPlay,String phoneState,String phonePackage,String callingPackage){
+            this.mode=mode;this.state=state;this.playState=playState;this.usage=usage;this.flags=flags;this.delayMs=delayMs;
+            this.oemMethodsPresent=present;this.waiting=waiting;this.canPlay=canPlay;
+            this.phoneState=phoneState;this.phonePackage=phonePackage;this.callingPackage=callingPackage;
+        }
+        boolean eligible(boolean afterFlush){
+            return family(mode)==1&&state==AudioTrack.STATE_INITIALIZED
+                &&(playState==AudioTrack.PLAYSTATE_STOPPED||afterFlush&&playState==AudioTrack.PLAYSTATE_PAUSED)
+                &&usage==17&&(flags&0x10000)!=0&&delayMs==0&&oemMethodsPresent&&!waiting&&!canPlay
+                &&"1".equals(phoneState)&&phonePackage!=null&&!phonePackage.isEmpty()
+                &&callingPackage!=null&&!callingPackage.equals(phonePackage);
+        }
+    }
+    interface UplinkStarter {
+        void play()throws Exception;
+        int playState();
+        int mode()throws Exception;
+        PstnStartCheck inspect()throws Exception;
+        void startAuthorizedCallImpl()throws Exception;
+        void report(String state,PstnStartCheck check);
+    }
+    static void startOwnedUplink(UplinkStarter starter,boolean afterFlush)throws Exception {
+        starter.play();
+        if(starter.playState()==AudioTrack.PLAYSTATE_PLAYING)return;
+        PstnStartCheck check=starter.inspect();starter.report("normal_start_refused",check);
+        if(check==null||!check.eligible(afterFlush))throw new IllegalStateException("call uplink did not start; OEM PSTN compatibility conditions not met");
+        // Re-read the OEM gate and real call mode immediately before using the same
+        // track's start implementation. Never modify properties or package identity.
+        check=starter.inspect();
+        if(check==null||!check.eligible(afterFlush)||family(starter.mode())!=1)
+            throw new IllegalStateException("call uplink conditions changed before OEM compatibility start");
+        starter.startAuthorizedCallImpl();
+        if(starter.playState()!=AudioTrack.PLAYSTATE_PLAYING||family(starter.mode())!=1)
+            throw new IllegalStateException("call uplink OEM compatibility start did not reach active PSTN playback");
+        starter.report("oem_pstn_compat_started_admission_only",check);
+    }
+
     /** Reflection keeps hidden SystemApi calls out of the public Android SDK dependency. */
     static final class AndroidPlatform implements Platform {
         private AudioManager manager;
@@ -182,12 +231,55 @@ final class NativeCallAudio implements AutoCloseable {
                     ||track.getChannelCount()!=UPLINK_CHANNELS||track.getAudioFormat()!=AudioFormat.ENCODING_PCM_16BIT)
                     throw new IOException("platform call uplink format/state mismatch");
             }catch(Exception|LinkageError e){try{track.release();}catch(RuntimeException|LinkageError release){throw new CleanupUnconfirmedException(release);}throw e;}
+            final UplinkStarter starter=new UplinkStarter(){
+                public void play(){track.play();}
+                public int playState(){return track.getPlayState();}
+                public int mode()throws Exception{return AndroidPlatform.this.mode();}
+                public PstnStartCheck inspect()throws Exception{return inspectPstnStart(track);}
+                public void startAuthorizedCallImpl()throws Exception{
+                    Method start=AudioTrack.class.getDeclaredMethod("startImpl");start.setAccessible(true);start.invoke(track);
+                }
+                public void report(String state,PstnStartCheck check){reportUplinkStart(track,state,check);}
+            };
             return new Uplink(){
-                public void start(){track.play();if(track.getPlayState()!=AudioTrack.PLAYSTATE_PLAYING)throw new IllegalStateException("call uplink did not start");}
-                public int write(byte[] p,int o,int n){return track.write(p,o,n,AudioTrack.WRITE_NON_BLOCKING);}
-                public void flush(){track.pause();track.flush();track.play();}
+                private boolean firstWrite;
+                public void start()throws Exception{startOwnedUplink(starter,false);}
+                public int write(byte[] p,int o,int n){
+                    int wrote=track.write(p,o,n,AudioTrack.WRITE_NON_BLOCKING);
+                    if(wrote>0&&!firstWrite){firstWrite=true;reportUplinkStart(track,"first_pcm_write_admission_only",null);}
+                    return wrote;
+                }
+                public void flush()throws Exception{track.pause();track.flush();startOwnedUplink(starter,true);}
                 public void close(){track.release();}
             };
+        }
+        private PstnStartCheck inspectPstnStart(AudioTrack track)throws Exception {
+            if(track.getClass()!=AudioTrack.class)return null;
+            try{
+                Field waiting=AudioTrack.class.getDeclaredField("mIsWait"),caller=AudioTrack.class.getDeclaredField("mCallingPkgName");
+                Method allowed=AudioTrack.class.getDeclaredMethod("canPlay"),start=AudioTrack.class.getDeclaredMethod("startImpl");
+                Method delay=AudioTrack.class.getSuperclass().getDeclaredMethod("getStartDelayMs");
+                waiting.setAccessible(true);caller.setAccessible(true);allowed.setAccessible(true);start.setAccessible(true);delay.setAccessible(true);
+                Class<?> properties=Class.forName("android.os.SystemProperties");Method get=properties.getMethod("get",String.class,String.class);
+                AudioAttributes attributes=track.getAudioAttributes();
+                int usage=((Integer)AudioAttributes.class.getMethod("getSystemUsage").invoke(attributes)).intValue();
+                int flags=((Integer)AudioAttributes.class.getMethod("getAllFlags").invoke(attributes)).intValue();
+                return new PstnStartCheck(mode(),track.getState(),track.getPlayState(),usage,flags,
+                    ((Integer)delay.invoke(track)).intValue(),true,waiting.getBoolean(track),((Boolean)allowed.invoke(track)).booleanValue(),
+                    (String)get.invoke(null,"sys.phonecall.state","0"),(String)get.invoke(null,"sys.phonecall.packagename",""),(String)caller.get(track));
+            }catch(ReflectiveOperationException|SecurityException unavailable){
+                MdMain.logFields("native_call_uplink_start","state","oem_compat_unavailable","detail",describe(unavailable));return null;
+            }
+        }
+        private static void reportUplinkStart(AudioTrack track,String state,PstnStartCheck check){
+            AudioDeviceInfo device=track.getRoutedDevice();
+            MdMain.logFields("native_call_uplink_start","state",state,"audio_session",track.getAudioSessionId(),
+                "track_state",track.getState(),"play_state",track.getPlayState(),"routed_device_type",device==null?-1:device.getType(),
+                "mode",check==null?-1:check.mode,"system_usage",check==null?-1:check.usage,"attribute_flags",check==null?-1:check.flags,
+                "start_delay_ms",check==null?-1:check.delayMs,"oem_waiting",check!=null&&check.waiting,"oem_can_play",check==null?null:check.canPlay,
+                "phone_state",check==null?null:check.phoneState,"phone_package",check==null?null:check.phonePackage,
+                "calling_package",check==null?null:check.callingPackage,"properties_changed",false,"package_identity_changed",false,
+                "physical_call_audio_confirmed",false);
         }
     }
 }

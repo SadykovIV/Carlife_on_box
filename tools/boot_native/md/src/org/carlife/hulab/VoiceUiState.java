@@ -4,7 +4,7 @@ package org.carlife.hulab;
 final class VoiceUiState {
     static final long START_TIMEOUT_MS=2800, RUN_TIMEOUT_MS=45000;
     enum Phase { IDLE, LAUNCHING, WAIT_ROUTE, RUNNING }
-    private long generation,started,runningSince;
+    private long generation,started,runningSince,focusTurn,focusGeneration;
     private int targetUid=-1,currentUid=-1,currentSession=-1,runningSession=-1;
     private final java.util.HashSet<Long> preexisting=new java.util.HashSet<Long>();
     private String targetPackage="",currentPackage="";
@@ -14,7 +14,7 @@ final class VoiceUiState {
     synchronized long begin(long now,int priorUid,int priorSession){return begin(now,new int[][]{{priorUid,priorSession}});}
     synchronized long begin(long now,int[][] prior){
         if(phase!=Phase.IDLE)return 0;
-        ++generation;started=now;runningSince=0;preexisting.clear();
+        ++generation;started=now;runningSince=0;focusTurn=0;focusGeneration=0;preexisting.clear();
         if(prior!=null)for(int[] pair:prior)if(pair!=null&&pair.length==2&&pair[0]>=1000&&pair[1]>0)preexisting.add(identity(pair[0],pair[1]));
         targetUid=-1;targetPackage="";currentUid=-1;currentSession=-1;runningSession=-1;currentPackage="";launched=false;
         phase=Phase.LAUNCHING;return generation;
@@ -58,6 +58,10 @@ final class VoiceUiState {
     synchronized Phase phase(){return phase;}
     synchronized String targetPackage(){return targetPackage;}
     synchronized boolean matches(int uid,String pkg){return uid==targetUid&&targetPackage.equals(pkg);}
+    synchronized void focusGranted(int uid,String pkg,long turn){if(turn>0&&phase!=Phase.IDLE&&matches(uid,pkg)){focusTurn=turn;focusGeneration=generation;}}
+    /** The focus turn is bound to the UI generation present at grant time.
+     * An old terminal callback must not finish a newer explicit HU request. */
+    synchronized long focusEnded(int uid,String pkg,long turn){if(turn<=0||turn!=focusTurn||focusGeneration!=generation||phase==Phase.IDLE||!matches(uid,pkg))return 0;focusTurn=0;return generation;}
     synchronized boolean ownsRecorder(int uid,int session,String pkg){return phase==Phase.RUNNING&&matches(uid,pkg)&&session==runningSession;}
     /** New recorder attributable to this request, including route-before-am-return. */
     synchronized boolean ownsPendingOrRunningRecorder(long token,int uid,int session,String pkg){

@@ -49,6 +49,18 @@ public final class VoiceUiStateTest {
         check(!s.route(e,10060,40,"voice.app",6020),"pre-existing unverified recorder cannot become a new session when injection verification completes");
         check(!s.route(e,10060,41,"voice.app",6030),"all prior target sessions retained, not only selected route");
         check(s.route(e,10060,42,"voice.app",6040),"genuinely new session still starts after immutable baseline snapshot");s.finish(e);
+        long f=s.begin(7000,-1,-1);s.target(f,10060,"ru.yandex.yandexnavi");s.route(f,10060,60,"ru.yandex.yandexnavi",7010);s.launched(f,7020);
+        s.focusGranted(10060,"ru.yandex.yandexnavi",10);
+        s.route(f,-1,-1,null,7030);
+        check(s.current(f)&&s.phase()==VoiceUiState.Phase.RUNNING,"MEDIA reply may release recorder without ending the UI turn");
+        check(s.focusEnded(10060,"ru.yandex.yandexnavi",9)==0&&s.current(f),"stale focus epoch cannot finish current UI");
+        check(s.focusEnded(10060,"ru.yandex.yandexnavi",10)==f,"terminal focus callback identifies the exact UI generation to finish");
+        check(s.finish(f),"focus end can retire UI immediately instead of waiting45s");
+        long g=s.begin(8000,-1,-1);s.target(g,10060,"ru.yandex.yandexnavi");s.focusGranted(10060,"ru.yandex.yandexnavi",11);
+        check(s.focusEnded(10060,"ru.yandex.yandexnavi",10)==0&&s.current(g),"old turn completion cannot close a newer HU launch");
+        check(s.focusEnded(10061,"ru.yandex.yandexnavi",11)==0,"focus owner UID must match UI target");
+        check(s.focusEnded(10060,"other.app",11)==0,"focus owner package must match UI target");
+        check(s.focusEnded(10060,"ru.yandex.yandexnavi",11)==g,"matching next focus turn may finish independently");
         System.out.println("VoiceUiStateTest PASS "+checks+" checks; actual assistant UI acceptance requires Android/HU");
     }
 }

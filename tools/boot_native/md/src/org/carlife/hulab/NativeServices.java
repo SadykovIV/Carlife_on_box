@@ -43,7 +43,7 @@ final class NativeServices implements AutoCloseable {
     private volatile PendingIntent routeStop;
     private String routeKey,coverKey;private byte[] cover=new byte[0];private long controllerEpoch;
     private MediaSessionManager.OnActiveSessionsChangedListener sessions;private long mediaRegistrationEpoch;
-    NativeServices(String recognizerComponent){voice=new NativeVoice(wire,recognizerComponent);microphone=new NativeMicrophone(new NativeMicrophone.Demand(){public void changed(boolean wanted){wire.applicationMicrophone(wanted);}},new NativeMicrophone.RouteListener(){public void changed(NativeMicrophone.Recorder recorder){voice.onMicrophoneRoute(recorder);}public void communicationChanged(boolean active){actualCommunication=active;voice.onCommunicationChanged(active||callHold);}});voice.attachMicrophone(microphone);}
+    NativeServices(String recognizerComponent){voice=new NativeVoice(wire,recognizerComponent);microphone=new NativeMicrophone(new NativeMicrophone.Demand(){public void changed(boolean wanted){wire.applicationMicrophone(wanted);}},new NativeMicrophone.RouteListener(){public void changed(NativeMicrophone.Recorder recorder){voice.onMicrophoneRoute(recorder);}public void communicationChanged(boolean active){actualCommunication=active;voice.onCommunicationChanged(active||callHold);}public void replyChanged(boolean active){voice.onApplicationReply(active);}public void focusTurn(int uid,String pkg,long turn,boolean active){voice.onApplicationFocusTurn(uid,pkg,turn,active);}});voice.attachMicrophone(microphone);}
     synchronized void start(){
         if(thread!=null||closed)return;thread=new HandlerThread("carlife-native-services");thread.start();worker=new Handler(thread.getLooper());
         worker.post(initializeTask);microphone.start();
@@ -151,22 +151,28 @@ final class NativeServices implements AutoCloseable {
     void onHuInfo(byte[] payload){try{wire.huInfo(payload);}catch(IOException e){diagnostic("hu_info_invalid",e);}}
     boolean onCommand(int id,byte[] payload)throws IOException {
         if(closed)return false;if(wire.command(id,payload))return true;
-        if(id==0x18028){Map<Integer,Object> f=MdMain.Proto.parse(payload);if(MdMain.Proto.number(f,1,-1)==2&&MdMain.Proto.number(f,2,-1)==0)stopNavigation();if(MdMain.Proto.number(f,1,-1)==4){if(MdMain.Proto.number(f,2,0)==1){voice.start();return true;}voice.stop();return true;}}
+        if(id==0x18028){Map<Integer,Object> f=MdMain.Proto.parse(payload);if(MdMain.Proto.number(f,1,-1)==2&&MdMain.Proto.number(f,2,-1)==0)stopNavigation();if(MdMain.Proto.number(f,1,-1)==4){int status=MdMain.Proto.number(f,2,-1);if(status==1){startVoiceFromHeadUnit();return true;}if(status==0||status==3){stopVoiceFromHeadUnit();return true;}return false;}}
         if(id==0x1801e)return launchPhone();if(id==0x1801f)return launchNavi();if(id==0x18020)return launchMedia();return false;
     }
     boolean onHardkey(final int key){
-        if(closed)return false;if(key==0x21){voice.start();return true;}if(key==0x22){voice.stop();return true;}
+        if(closed)return false;if(key==0x21){startVoiceFromHeadUnit();return true;}if(key==0x22){stopVoiceFromHeadUnit();return true;}
         if(key==0x0b)return launchNavi();if(key==0x09)return launchMedia();
         if(key!=0x0f&&key!=0x10&&key!=0x1f&&key!=0x20)return false;
         final MediaController target=controller;Handler h=worker;if(target==null||h==null)return false;
         h.post(new Runnable(){public void run(){if(closed||target!=controller)return;try{MediaController.TransportControls c=target.getTransportControls();if(key==0x0f)c.skipToPrevious();else if(key==0x10)c.skipToNext();else if(key==0x1f)c.play();else c.pause();}catch(RuntimeException e){diagnostic("media_key_failed",e);}}});return true;
     }
+    private void startVoiceFromHeadUnit(){microphone.resumeOwnedRecorder();voice.start();}
+    private void stopVoiceFromHeadUnit(){microphone.stopFromHeadUnit();voice.stop();}
     void callAudioHold(boolean value){if(closed||callHold==value)return;callHold=value;microphone.callHold(value);voice.onCommunicationChanged(value||actualCommunication);}
     boolean callAudioRetired(){return !closed&&callHold&&microphone.callRetired()&&voice.callRetired()&&wire.nonCallMicrophoneIdle();}
     void callVoice(boolean value){if(!closed)wire.callVoice(value);}
     void callMicrophone(boolean value){if(!closed)wire.callMicrophone(value);}
     void onMic(byte[] pcm,int timestamp){if(!closed&&!callHold){microphone.onMic(pcm,timestamp);voice.onMic(pcm,timestamp);}}
     Output poll(){NativeServiceState.Output p=wire.poll();return p==null?null:new Output(p.id,p.payload);}
+    void outputWritten(Output output,long now){if(!closed&&output!=null)wire.outputWritten(output.id,output.payload,now);}
+    void voiceStatusWritten(boolean active,long now){if(!closed)wire.voiceStatusWritten(active,now);}
+    boolean voiceStartEcho(long now){return !closed&&wire.voiceStartEcho(now);}
+    boolean voiceControlEcho(int state,long now){return !closed&&wire.voiceControlEcho(state,now);}
     boolean routeNaviWanted(){return wire.routeNaviWanted();}
     boolean voiceActive(){return wire.voiceModuleActive();}
     void assistantPlaybackActive(boolean active){if(closed)return;try{wire.voiceModule(false,active);}catch(IOException e){diagnostic("assistant_module_encode_failed",e);}}

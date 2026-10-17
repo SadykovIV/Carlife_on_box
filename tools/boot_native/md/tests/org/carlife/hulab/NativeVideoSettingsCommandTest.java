@@ -31,6 +31,11 @@ public final class NativeVideoSettingsCommandTest {
         long start=System.nanoTime();
         rejects(()->command("wait",""),"timeout");
         check(TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-start)<3000,"command timeout bounded below3s");
+        NativeVideoSettings.ChangeWatch watch=new NativeVideoSettings.ChangeWatch();
+        long revision=watch.revision();watch.changed();watch.changed();
+        check(watch.revision()==revision+2,"each provider callback retains a revision, including during an in-flight read");
+        watch.close();watch.changed();watch.close();
+        check(watch.revision()==revision+2&&!watch.registered(),"closed observer fences late callbacks and duplicate close");
         System.out.println("PASS "+checks+" settings argv/output/exit/timeout checks; no Android calls");
     }
 }

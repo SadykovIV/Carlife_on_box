@@ -11,7 +11,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
-import android.provider.Settings;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
@@ -24,30 +23,52 @@ import java.util.concurrent.TimeUnit;
 final class NativeVoice {
     private final NativeServiceState wire;private final String component;
     private Context context;private Handler main;private SpeechRecognizer recognizer;
-    private volatile boolean available,closed,active,availabilityBlocked,availabilityPending,callAudioActive;
+    private volatile boolean available,closed,active,availabilityBlocked,availabilityPending,callAudioActive,applicationReply;
     private boolean prepared;
     private long epoch;private Pipe pipe;
     private volatile long micWithoutPipePackets,micWithoutPipeBytes;
     private final VoiceUiState uiState=new VoiceUiState();
     private NativeMicrophone microphone;
     private volatile Process uiLaunchProcess;private Process searchProcess;
+    private Thread availabilityThread;
+    private volatile String[] savedVoiceSettings={null,null,null};
+    private volatile boolean voiceSettingsObserved;
     private long uiProcessToken;
     NativeVoice(NativeServiceState wire,String component){this.wire=wire;this.component=component;}
     synchronized void attachMicrophone(NativeMicrophone value){microphone=value;}
     synchronized void prepare(Context c,Handler h){if(prepared||closed)return;prepared=true;context=c;main=h;refreshAvailability();}
     void refreshAvailability(){
-        Handler h;
-        synchronized(this){if(closed||available||availabilityBlocked||availabilityPending||main==null)return;availabilityPending=true;h=main;}
-        h.post(new Runnable(){public void run(){
+        synchronized(this){
+            if(closed||available||availabilityBlocked||availabilityPending||main==null)return;
+            availabilityPending=true;
+            availabilityThread=new Thread(new Runnable(){public void run(){
             try{if(closed)return;
+                refreshVoiceSettings();if(closed)return;
                 if(!explicitRecognizer()) {available=hasVoiceUi();diagnostic(available?"voice_launch_handler_available":"voice_ui_handler_unavailable");return;}
                 if(android.os.Build.VERSION.SDK_INT<33){availabilityBlocked=true;diagnostic("external_audio_api_unavailable");return;}
                 available=hasExplicitRecognizer();diagnostic(available?"explicit_recognizer_ready":"explicit_recognizer_not_ready");
             }catch(SecurityException e){availabilityBlocked=true;diagnostic("recognizer_permission_denied");}
             catch(RuntimeException e){diagnostic("recognizer_readiness_error "+e.getClass().getSimpleName());}
-            finally{availabilityPending=false;}
-        }});
+            finally{synchronized(NativeVoice.this){availabilityPending=false;if(availabilityThread==Thread.currentThread())availabilityThread=null;}}
+            }},"carlife-voice-availability");
+            availabilityThread.setDaemon(true);
+            try{availabilityThread.start();}catch(RuntimeException e){availabilityPending=false;availabilityThread=null;diagnostic("voice_availability_dispatch_failed","error_type",e.getClass().getSimpleName());}
+        }
     }
+    /** Bare app_process cannot acquire SettingsProvider through an ApplicationThread.
+     * Use the existing bounded settings Binder CLI on this worker; UI/main never waits. */
+    private void refreshVoiceSettings(){
+        String[] keys={"voice_interaction_service","assistant","voice_recognition_service"};
+        String[] values={null,null,null};
+        try{
+            for(int i=0;i<(explicitRecognizer()?3:2);i++){
+                if(closed||Thread.currentThread().isInterrupted())return;
+                values[i]=settingValue(NativeVideoSettings.command("/system/bin/settings","--user","current","get","secure",keys[i]));
+            }
+            if(!closed){savedVoiceSettings=values;voiceSettingsObserved=true;}
+        }catch(Exception e){if(e instanceof InterruptedException)Thread.currentThread().interrupt();diagnostic("voice_settings_cli_unavailable","error_type",e.getClass().getSimpleName());}
+    }
+    static String settingValue(String value){if(value==null)return null;String clean=value.trim();return clean.isEmpty()||"null".equals(clean)?null:clean;}
     private boolean hasExplicitRecognizer(){
         ComponentName selected=ComponentName.unflattenFromString(component);
         if(selected==null){availabilityBlocked=true;diagnostic("invalid_explicit_recognizer_component");return false;}
@@ -101,14 +122,15 @@ final class NativeVoice {
     }
     private String installedAssistantPackage(){
         PackageManager pm=context.getPackageManager();
-        for(String key:new String[]{"voice_interaction_service","assistant"}){
-            String saved=Settings.Secure.getString(context.getContentResolver(),key);
+        String[] observed=savedVoiceSettings;
+        for(int index=0;index<2;index++){
+            String saved=observed[index];
             ComponentName selected=saved==null?null:ComponentName.unflattenFromString(saved);if(selected==null)continue;
             try{
                 android.content.pm.ServiceInfo info=pm.getServiceInfo(selected,0);
                 if(info.enabled&&info.exported&&info.applicationInfo!=null&&info.applicationInfo.enabled&&"android.permission.BIND_VOICE_INTERACTION".equals(info.permission))return selected.getPackageName();
             }catch(PackageManager.NameNotFoundException missing){}
-            if("assistant".equals(key))try{
+            if(index==1)try{
                 android.content.pm.ActivityInfo info=pm.getActivityInfo(selected,0);
                 if(info.enabled&&info.exported&&info.applicationInfo!=null&&info.applicationInfo.enabled)return selected.getPackageName();
             }catch(PackageManager.NameNotFoundException missing){}
@@ -202,15 +224,29 @@ final class NativeVoice {
         h.post(new Runnable(){public void run(){
             if(closed||!uiState.current(token))return;
             if(uiState.route(token,recorder==null?-1:recorder.uid,recorder==null?-1:recorder.session,recorder==null?null:recorder.pkg,SystemClock.uptimeMillis()))reportUiRunning(token);
-            if(active&&(recorder==null||!uiState.ownsRecorder(recorder.uid,recorder.session,recorder.pkg)))h.postDelayed(new Runnable(){public void run(){
+            if(active&&!applicationReply&&(recorder==null||!uiState.ownsRecorder(recorder.uid,recorder.session,recorder.pkg)))h.postDelayed(new Runnable(){public void run(){
                 NativeMicrophone.Recorder actual=microphone==null?null:microphone.verifiedRecorder();
-                if(uiState.current(token)&&active&&(actual==null||!uiState.ownsRecorder(actual.uid,actual.session,actual.pkg)))finishUi(token,"recorder_closed_or_preempted");
+                if(uiState.current(token)&&active&&!applicationReply&&(actual==null||!uiState.ownsRecorder(actual.uid,actual.session,actual.pkg)))finishUi(token,"recorder_closed_or_preempted");
             }},500);
         }});
     }
+    /** Same app's MEDIA answer must be audible on Honda while its persistent
+     * MIC stays open. Release wire ownership immediately, but keep the UI turn. */
+    synchronized void onApplicationReply(boolean replying){
+        if(closed||explicitRecognizer()||applicationReply==replying)return;
+        if(replying&&!NativeVoiceFocus.State.navigator(uiState.targetPackage()))return;
+        applicationReply=replying;
+        if(replying){wire.microphone(true,false);try{wire.voiceModule(true,false);}catch(IOException ignored){}diagnostic("application_reply_media_handoff","explicit_voice_active",active);}
+        else if(active&&microphone!=null){NativeMicrophone.Recorder recorder=microphone.verifiedRecorder();if(recorder!=null&&uiState.ownsRecorder(recorder.uid,recorder.session,recorder.pkg)){try{wire.voiceModule(true,true);wire.microphone(true,true);}catch(IOException ignored){}}}
+    }
+    void onApplicationFocusTurn(int uid,String pkg,long turn,boolean gained){
+        if(closed||explicitRecognizer())return;
+        if(gained)uiState.focusGranted(uid,pkg,turn);
+        else{long token=uiState.focusEnded(uid,pkg,turn);if(token!=0)finishUi(token,"application_voice_focus_ended");}
+    }
     private synchronized void reportUiRunning(long token){
         if(closed||!uiState.current(token)||uiState.phase()!=VoiceUiState.Phase.RUNNING||active)return;
-        active=true;try{wire.voiceModule(true,true);wire.microphone(true,true);}
+        active=true;try{if(!applicationReply){wire.voiceModule(true,true);wire.microphone(true,true);}}
         catch(IOException e){finishUi(token,"wire_error");return;}
         diagnostic("voice_ui_running","token",token,"target_package",uiState.targetPackage(),"recorder_route_verified",true,"wire_delivery_confirmed",false);
     }
@@ -224,7 +260,10 @@ final class NativeVoice {
         Process child=null;
         synchronized(this){
             NativeMicrophone.Recorder owned=microphone==null?null:microphone.verifiedRecorder();
-            boolean cancelRecorder=owned!=null&&uiState.ownsPendingOrRunningRecorder(token,owned.uid,owned.session,owned.pkg);
+            // Focus loss already retires its route on the microphone worker.
+            // Posting a second suppression by recorder identity could arrive after
+            // a new focus grant reuses that same recorder and cancel the new turn.
+            boolean cancelRecorder=!"application_voice_focus_ended".equals(reason)&&owned!=null&&uiState.ownsPendingOrRunningRecorder(token,owned.uid,owned.session,owned.pkg);
             if(!uiState.finish(token))return;
             if(cancelRecorder&&microphone!=null)microphone.suppressOwnedRecorder(owned);
             active=false;
@@ -249,10 +288,8 @@ final class NativeVoice {
             final Pipe p=new Pipe(token);synchronized(this){pipe=p;}
             stage="select_recognizer";
             ComponentName selected=component==null||component.isEmpty()?null:ComponentName.unflattenFromString(component);
-            String configuredDefault=null;
-            try{configuredDefault=Settings.Secure.getString(context.getContentResolver(),"voice_recognition_service");}
-            catch(RuntimeException e){diagnostic("provider_setting_unreadable","token",token,"error_type",e.getClass().getSimpleName());}
-            diagnostic("recognizer_selection","token",token,"selection",component==null||component.isEmpty()?"system_default":"explicit","selected_component",component,"default_component",configuredDefault,"default_component_is_observed_setting",true);
+            String configuredDefault=savedVoiceSettings[2];
+            diagnostic("recognizer_selection","token",token,"selection",component==null||component.isEmpty()?"system_default":"explicit","selected_component",component,"default_component",configuredDefault,"default_component_is_observed_setting",voiceSettingsObserved);
             if(component!=null&&!component.isEmpty()&&selected==null)throw new IOException("invalid recognizer component");
             stage="create_speech_recognizer";
             recognizer=selected==null?SpeechRecognizer.createSpeechRecognizer(context):SpeechRecognizer.createSpeechRecognizer(context,selected);
@@ -318,7 +355,7 @@ final class NativeVoice {
     }
     synchronized boolean callRetired(){return !active&&pipe==null;}
     boolean active(){return active&&!closed;}
-    void close(){Process child;synchronized(this){closed=true;if(!explicitRecognizer())finishUi(uiState.token(),"close");child=uiLaunchProcess;uiLaunchProcess=null;if(searchProcess!=null){searchProcess.destroyForcibly();searchProcess=null;}}available=false;active=false;if(child!=null)child.destroyForcibly();Handler h=main;if(h!=null&&explicitRecognizer())h.post(new Runnable(){public void run(){finish(epoch,false,null);}});Pipe p;synchronized(this){p=pipe;pipe=null;diagnostic("closed","mic_packets_without_pipe",micWithoutPipePackets,"mic_pcm_bytes_without_pipe",micWithoutPipeBytes);}if(p!=null)p.close();}
+    void close(){Process child;synchronized(this){closed=true;if(availabilityThread!=null)availabilityThread.interrupt();if(!explicitRecognizer())finishUi(uiState.token(),"close");child=uiLaunchProcess;uiLaunchProcess=null;if(searchProcess!=null){searchProcess.destroyForcibly();searchProcess=null;}}available=false;active=false;if(child!=null)child.destroyForcibly();Handler h=main;if(h!=null&&explicitRecognizer())h.post(new Runnable(){public void run(){finish(epoch,false,null);}});Pipe p;synchronized(this){p=pipe;pipe=null;diagnostic("closed","mic_packets_without_pipe",micWithoutPipePackets,"mic_pcm_bytes_without_pipe",micWithoutPipeBytes);}if(p!=null)p.close();}
     private static void diagnostic(String detail,Object...fields){Object[] all=new Object[fields.length+2];all[0]="state";all[1]=detail;System.arraycopy(fields,0,all,2,fields.length);MdMain.logFields("native_voice",all);}
     /** Startup exceptions only: no recognizer results, audio buffers or Intent extras. */
     static String startFailureDetail(Throwable error){

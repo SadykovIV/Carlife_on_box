@@ -18,6 +18,8 @@ final class BootNativeReadiness implements Runnable {
     private long sequence,lastWaitingLog;
     private String lastPublished="",lastVideoStatus="";
     private long nextSettingsStatusAttempt;
+    private final NativeVideoSettings.ChangeWatch videoWatch=new NativeVideoSettings.ChangeWatch();
+    private long nextSettingsWatchAttempt,nextSettingsReadAttempt,settingsRevision=-1;
     private MediaCodecDisplaySource.Selection defaultSelection;
 
     BootNativeReadiness(String path,String nonce)throws Exception {
@@ -38,7 +40,7 @@ final class BootNativeReadiness implements Runnable {
     static String readLine(String path)throws IOException {try(BufferedReader r=new BufferedReader(new FileReader(path))){String s=r.readLine();if(s==null||s.length()>8192)throw new IOException("missing/oversize file "+path);return s;}}
     void start(){worker=new Thread(this,"boot-native-media-readiness");worker.setDaemon(true);worker.start();}
     void commandReady(boolean ready){commandReady=ready;publishQuietly();}
-    void stop(){stopped=true;commandReady=false;mediaReady=false;stage="STOPPED";if(worker!=null)worker.interrupt();publishQuietly();}
+    void stop(){stopped=true;commandReady=false;mediaReady=false;stage="STOPPED";videoWatch.close();if(worker!=null)worker.interrupt();publishQuietly();}
     static boolean servicePresent(String name)throws Exception {
         Class<?> s=Class.forName("android.os.ServiceManager");
         return s.getDeclaredMethod("checkService",String.class).invoke(null,name)!=null;
@@ -100,7 +102,7 @@ final class BootNativeReadiness implements Runnable {
                             if(config==null)continue;
                             VideoMode requested=config.requested(ticket.hintWidth,ticket.hintHeight,ticket.hintFps);
                             width=requested.width;height=requested.height;fps=requested.fps;mode=config.mode;
-                            MdMain.logFields("video_settings_snapshot","session_id",s.sessionId,"logical_session",s.nativeLogicalSession,"generation",ticket.generation,"configuration",config.encoded(),"provenance",config.provenance,"hu_width",ticket.hintWidth,"hu_height",ticket.hintHeight,"hu_fps",ticket.hintFps,"requested_width",width,"requested_height",height,"requested_fps",fps,"changes_apply","next logical VERSION session");
+                            MdMain.logFields("video_settings_snapshot","session_id",s.sessionId,"logical_session",s.nativeLogicalSession,"generation",ticket.generation,"configuration",config.encoded(),"provenance",config.provenance,"hu_width",ticket.hintWidth,"hu_height",ticket.hintHeight,"hu_fps",ticket.hintFps,"requested_width",width,"requested_height",height,"requested_fps",fps,"changes_apply","saved change requests one clean session reconnect");
                         }
                         if(!ticket.current(s.pendingInit,s.videoGeneration,s.open))continue;
                         MediaCodecDisplaySource.Selection selected=width==1280&&height==720&&fps==30?defaultSelection:MdMain.selectOutput(width,height,fps,true,mode);
@@ -111,6 +113,25 @@ final class BootNativeReadiness implements Runnable {
                 // A failed SettingsProvider status write never closes an otherwise working USB session.
                 String status=s==null?"No active CarLife session":s.videoSettingsStatus;
                 long now=SystemClock.uptimeMillis();
+                // A saved mode is applied at a fresh handshake, not as an unsolicited
+                // INIT_DONE in the current decoder generation. The existing controller
+                // owns the clean MD-exit/rearm path; RESET keeps its keyframe semantics.
+                if(mediaReady&&s!=null&&s.open&&s.transport.isNativeUsb()&&s.videoConfig!=null){
+                    if(!videoWatch.registered()&&now>=nextSettingsWatchAttempt){
+                        try{videoWatch.start();MdMain.logFields("video_settings_observer_ready","key",NativeVideoConfig.KEY,"source","SettingsProvider global AtomicFile parent watch","polling",false);}
+                        catch(Exception unavailable){nextSettingsWatchAttempt=now+5000;MdMain.logFields("video_settings_observer_unavailable","error",unavailable.toString(),"saved_selection_kept",true,"manual_reconnect_available",true);}
+                    }
+                    long revision=videoWatch.revision();
+                    if(videoWatch.registered()&&revision!=settingsRevision&&now>=nextSettingsReadAttempt){
+                        try{
+                            NativeVideoConfig changed=NativeVideoSettings.read();
+                            // Consume only the revision read before the command: a newer
+                            // save during the bounded CLI read gets its own later sample.
+                            settingsRevision=revision;
+                            if(s.reloadVideoConfigIfChanged(changed))continue;
+                        }catch(Exception unavailable){nextSettingsReadAttempt=now+2000;MdMain.logFields("video_settings_change_unavailable","error",unavailable.toString(),"session_preserved",s.open);}
+                    }
+                }
                 if(mediaReady&&status!=null&&!status.equals(lastVideoStatus)&&now>=nextSettingsStatusAttempt){
                     try{NativeVideoSettings.publish(status);lastVideoStatus=status;}
                     catch(Exception unavailable){nextSettingsStatusAttempt=now+5000;MdMain.logFields("video_status_unavailable","error",unavailable.toString(),"session_affected",false);}

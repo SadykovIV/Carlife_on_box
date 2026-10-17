@@ -40,7 +40,7 @@ Output:
 - `build/md/manifest.json`: source/tool hashes and the test result.
 - `build/md/*.stdout.txt`, `*.stderr.txt`, `steps.json`: local build evidence.
 
-Use `--output /path/to/output` to keep a separate build. Test-only mode compiles both source layers and runs all 45 JVM suites without requiring D8:
+Use `--output /path/to/output` to keep a separate build. Test-only mode compiles both source layers and runs all 57 JVM suites without requiring D8:
 
 ```sh
 python3 scripts/build_md.py --test-only
@@ -60,6 +60,14 @@ The original publication at commit `3b344d45ae34df215166385ba0c65f195652f5d8` pa
 347c6ef1fdf0fa25d0c8ae4bd333c8cfce2ed6ed6d7c70cba9b6cbd1c55b87dd  md-boot-native.jar
 ```
 
+For **v0.2**, all **57 JVM suites** passed and the packaged MD was reproduced byte for byte with JDK 17.0.16, API 35 and R8/D8 8.3.37 (compiler JAR SHA256 `900dfbc649519969fc5a4c7520d6b7355338e565fa1249874e0190b8d61b1199`):
+
+```text
+a1ad080b9606390841c10aef756aa6cf90a8636e778fa1f9fd0b87a7f8cbf06a  md-boot-native.jar
+```
+
+The earlier `347c6ef1…` hash is historical. D8 9.4.14 also builds the source, but produces different DEX bytes and was not used for the packaged MD.
+
 A different JDK or D8 version can change artifact bytes; compare the generated manifest. A successful host build does not prove USB, display capture, injection permissions or a particular car head unit works.
 
 ## Runtime integration
@@ -68,7 +76,7 @@ Pass the resulting JAR to the board-specific runtime build/deployment described 
 
 The tested native path mirrors the actual Android display through EGL into a MediaCodec Surface, sends H.264 through direct USB accessory I/O, and injects CarLife input with the process's existing privileges. It requires the board's USB/accessory support, compatible mirroring APIs and appropriate input/capture permissions. Do not remove the source lease, RESET generation checks or OEM CSD guard to make an incompatible board appear supported. The exceptional CSD source selection is tied to a measured OEM library hash; it must be evaluated for the target firmware.
 
-An opt-in output-audio candidate is [implemented and tested offline](AUDIO_CANDIDATE.md). Microphone/voice, separate TTS and mandatory head-unit authentication/encryption are not implemented. Multi-pointer parsers exist, but the tested Honda head unit did not provide confirmed second-pointer coordinates in the observed CarLife mode. These are separate from a successful build.
+An opt-in output-audio candidate is [implemented and tested offline](AUDIO_CANDIDATE.md). USB microphone/voice, separate TTS and call paths are implemented; current acceptance is recorded in [service status](CARLIFE_SERVICES_STATUS.md). Mandatory encrypted-media/legacy-authentication profiles remain unsupported. Multi-pointer parsers exist, but the tested Honda head unit did not provide confirmed second-pointer coordinates in the observed CarLife mode. These are separate from a successful build.
 
 ## Optional: OEM selector APK integration
 

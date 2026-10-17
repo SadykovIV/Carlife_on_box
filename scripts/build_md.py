@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 COMMON = ROOT / 'android-md'
 NATIVE = ROOT / 'tools/boot_native/md'
 TESTS = [
+    'NativeVoiceFocusTest',
     'MdWireTest', 'MdWriterRaceTest', 'MdWatchdogRaceTest', 'DrainUntilStoppedTest',
     'PipelineProgressTest', 'AvcAccessUnitsTest', 'SourceLeaseTest', 'ProjectionTouchTest', 'LegacyMultitouchTest',
     'OemCsdGuardTest', 'AccessoryTransportTest', 'NativeSessionBoundaryTest', 'AsyncRingLogTest',
@@ -111,6 +112,7 @@ def main():
         raise ValueError('Missing common/native source layer')
     sources = dict(common)
     sources.update(overlay)
+    compile_stubs = sorted((NATIVE / 'compile-stubs').rglob('*.java'))
     test_sources = sorted((COMMON / 'tests').rglob('*.java')) + sorted((NATIVE / 'tests').rglob('*.java'))
     fixture_provenance = json.loads((COMMON / 'tests/fixtures/provenance.json').read_text())
     for name, expected in fixture_provenance['files'].items():
@@ -123,10 +125,15 @@ def main():
         work = Path(temporary)
         classes = work / 'classes'
         classes.mkdir()
-        run([javac, '--release', '8', '-cp', api, '-d', classes, *sources.values()], 'javac')
+        stubs = work / 'compile-stubs'
+        stubs.mkdir()
+        if compile_stubs:
+            run([javac, '--release', '8', '-cp', api, '-d', stubs, *compile_stubs], 'javac-compile-stubs')
+        compile_cp = str(api) + os.pathsep + str(stubs)
+        run([javac, '--release', '8', '-cp', compile_cp, '-d', classes, *sources.values()], 'javac')
         tests = work / 'test-classes'
         tests.mkdir()
-        cp = str(classes) + os.pathsep + str(api)
+        cp = str(classes) + os.pathsep + compile_cp
         run([javac, '--release', '8', '-cp', cp, '-d', tests, *test_sources], 'test-javac')
         test_cp = str(tests) + os.pathsep + cp
         for name in TESTS:
@@ -138,7 +145,8 @@ def main():
             fixed_zip(classes_jar, [(p.relative_to(classes).as_posix(), p.read_bytes()) for p in classes.rglob('*.class')])
             dex = work / 'dex'
             dex.mkdir()
-            run([*d8_command, '--min-api', '21', '--lib', api, '--output', dex, classes_jar], 'd8')
+            # Framework signature stubs are resolution-only, never program/Dex input.
+            run([*d8_command, '--min-api', '21', '--lib', api, '--classpath', stubs, '--output', dex, classes_jar], 'd8')
             if sorted(p.name for p in dex.iterdir()) != ['classes.dex']:
                 raise ValueError('Expected exactly one classes.dex; review multidex handling before use')
             fixed_zip(work / 'md-boot-native.jar', [('classes.dex', (dex / 'classes.dex').read_bytes())])
@@ -152,6 +160,7 @@ def main():
         'zlib_version': zlib.ZLIB_RUNTIME_VERSION, 'android_jar_sha256': sha(api),
         'd8_input_sha256': sha(compiler) if compiler else None,
         'source_sha256': {p.relative_to(ROOT).as_posix(): sha(p) for p in sources.values()},
+        'compile_only_stub_sha256': {p.relative_to(ROOT).as_posix(): sha(p) for p in compile_stubs},
         'common_source_sha256': {p.relative_to(ROOT).as_posix(): sha(p) for p in common.values()},
         'overlay_keys': sorted(overlay),
         'test_source_sha256': {p.relative_to(ROOT).as_posix(): sha(p) for p in test_sources},

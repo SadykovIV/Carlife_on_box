@@ -1,6 +1,6 @@
 # Baidu CarLife on Android Box
 
-**THIS BUILD HAS NOT BEEN TESTED WITH AN AUTOMOTIVE HEAD UNIT.** This is a prerelease for testing; earlier Honda results do not establish acceptance of this build.
+**v0.2 is a development prerelease.** Startup and hot reconnect were checked on the Honda bench baseline; full in-car audio, microphone and call acceptance remains pending. This release also adds an offline-tested shutdown cleanup fix. See the [validation record](docs/RELEASE_0_2_VALIDATION.md).
 
 **Carlife_on_box** adds a native Baidu CarLife mobile-device backend to an Android box: the box projects its own Android launcher and applications to a CarLife head unit over USB, and receives touch and navigation input through CarLife.
 
@@ -24,7 +24,7 @@ A fresh system integration seeds **Baidu CarLife** as the default. A later owner
 
 | Area | Status |
 | --- | --- |
-| Reference native runtime | Earlier baseline tested on the development box with Honda; this prerelease tested with Mac HU only |
+| Reference native runtime | Honda bench baseline: automatic cold image and hot reconnect accepted; final ZIP adds a cleanup-only change awaiting device verification |
 | Full integrated OTA candidate | Built and checked offline; **not installed or boot-tested** |
 | Other Android boxes | Require a device profile and hardware validation |
 | Audio | USB MEDIA/TTS/VR, application microphone injection and synthetic duplex call audio checked on Mac; automotive acceptance of this build pending |
@@ -41,11 +41,11 @@ The source repository contains project code, build tools and tests. The package 
 
 ## Start here
 
-The current [prerelease](<https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.16-usb-call-lab2>) provides **`Carlife_on_box-TBox-Ultra-2026.10.16-usb-call-lab2.zip`**: one Magisk file for compatible TBox Ultra initial installation or update, including OEM protocol and resolution/FPS settings. Fresh defaults are Baidu CarLife and **Requested by head unit**; updates preserve choices. Rollback is included on-device. See the [short installation/rollback guide](docs/INSTALL_RELEASE.md) and [detailed installer guide](docs/MAGISK_INSTALLER.md). Clean installation on a second physical box remains unverified.
+The current [prerelease](<https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.17>) provides **`Carlife_on_box-TBox-Ultra-2026.10.17-v0.2.zip`**: one Magisk file for compatible TBox Ultra initial installation or update, including OEM protocol and resolution/FPS settings. Fresh defaults are Baidu CarLife and **Requested by head unit**; updates preserve choices. Rollback is included on-device. See the [short installation/rollback guide](docs/INSTALL_RELEASE.md) and [detailed installer guide](docs/MAGISK_INSTALLER.md). Clean installation on a second physical box remains unverified.
 
-This build connects the USB call-audio path to the live session, handles mute/unmute and return to music, and removes repeated music-status commands from every PCM packet. **56 JVM test suites and 133 host tests passed.** Mac tests exercised generated duplex audio, native RESET and session reconnection during active audio. These are synthetic local tests, not real SIM/VoIP calls or automotive microphone tests.
+Compared with [v0.1](https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.16), v0.2 improves early startup and USB reconnect, preserves saved resolution/FPS when reconnecting, and refines assistant/microphone ownership. The cold-start baseline produced its first IDR at **21.7 seconds of Android uptime**; the owner accepted hot reconnect in **about 5–7 seconds after plugging back in**. These are different measurements, not universal timing guarantees. **30 FPS** is the tested Honda setting; 60 FPS is not validated there.
 
-Older [r6](https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.15-r6) and [r7](https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.15-r7) remain historical releases; their separate ZIP workflows do not apply to the current combined package. [Video settings details](docs/en/VIDEO_SETTINGS.md).
+The release keeps the tested MD and adds bounded controller-process cleanup for future updates. **57 MD JVM suites, 167 boot-controller tests and package rollback regressions passed.** Exact build boundaries and pending car checks are in the [validation record](docs/RELEASE_0_2_VALIDATION.md). The existing OEM settings APKs are retained; no new UI redesign is included. [Video settings](docs/en/VIDEO_SETTINGS.md).
 
 1. [Build the Android MD](docs/BUILD_MD.md) — shared source + native USB overlay, JVM tests and a DEX JAR.
 2. [Build the runtime and system overlay](docs/BUILD_RUNTIME.md) — observer, selector service and exact SM6350 integration.

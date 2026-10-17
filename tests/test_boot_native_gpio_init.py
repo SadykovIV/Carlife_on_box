@@ -43,6 +43,8 @@ write_node() {{
     body=TEXT[TEXT.index('ADOPT=0\n'):TEXT.index('\nwhile ! stop_requested; do',TEXT.index('ADOPT=0\n'))]
     setup+=f'''physical_profile() {{ return {0 if adopt else 1}; }}
 phase() {{ printf 'PHASE %s\\n' "$1"; }}
+bootstrap_qcom_main_once() {{ :; }}
+bootstrap_qcom_main_if_due() {{ :; }}
 start_md() {{ printf 'MD_START\\n'; }}
 start_observer() {{ printf 'OBSERVER_START\\n'; }}
 wait_md_ready() {{ printf 'MD_READY\\n'; }}

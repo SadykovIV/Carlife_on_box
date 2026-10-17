@@ -1,12 +1,20 @@
 # CarLife services: current status
 
+## v0.2 — 2026-10-17
+
+Current release: [v2026.10.17](https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.17). Saved video settings, assistant ownership/warm microphone handling, early startup and hot reconnect changed after v0.1. **Audible assistant responses, initial-syllable preservation and real SIM/VoIP duplex remain pending in-car checks.** Log-based voice lifecycle checks do not establish audibility. The final ZIP adds an offline-tested controller cleanup fix to the accepted video/reconnect baseline; [validation details](RELEASE_0_2_VALIDATION.md).
+
+## Historical lab2 evidence (2026-10-16)
+
+The dated results below are preserved for their original build; they are not acceptance of v0.2.
+
 **This exact lab2 build has NOT been tested with an automotive head unit, including Honda.** Mac laboratory results below do not establish real-HU microphone or call support.
 
 [Русский](ru/CARLIFE_SERVICES_STATUS.md) · [Installation](MAGISK_INSTALLER.md) · [Build](BUILD_MD.md)
 
-Status as of 2026-10-16. The current development package is **2026.10.16-usb-call-lab2**: the call endpoint pair is now connected to the working native CarLife session. It observes an existing Android call mode and carries downlink and uplink over USB. This is not yet acceptance of real SIM/VoIP calls or Honda interoperability. The exact working **final-release3 baseline remains saved**, with a separate return procedure below.
+Status as of 2026-10-16. The development package at that checkpoint was **2026.10.16-usb-call-lab2**: the call endpoint pair was connected to the working native CarLife session. It observes an existing Android call mode and carries downlink and uplink over USB. This is not yet acceptance of real SIM/VoIP calls or Honda interoperability. The exact working **final-release3 baseline remains saved**, with a separate return procedure below.
 
-## Current development package: USB call lab2
+## Lab2 development package (2026-10-16)
 
 | Artifact | SHA256 |
 | --- | --- |
@@ -110,9 +118,9 @@ adb -s CURRENT_IP_PORT reboot
 
 The generic package `rollback` command targets the older pre-combined mic-test4 backup; it is **not** this exact final3 return. Both backups are preserved. This return procedure is prepared and its files verified; a hardware rollback has not been executed in this stage.
 
-## Validation and boundaries
+## Lab2 validation and boundaries
 
-The latest completed local MD run passed **56 JVM suites**, including 109 call-session checks, paired call-endpoint tests, three-lane audio ownership/order, explicit VR STOP/resume, session RESET, microphone handover and navigation parsing. Repeat with the API 35/JDK 17 toolchain from [BUILD_MD](BUILD_MD.md):
+At the lab2 checkpoint, the local MD run passed **56 JVM suites**, including 109 call-session checks, paired call-endpoint tests, three-lane audio ownership/order, explicit VR STOP/resume, session RESET, microphone handover and navigation parsing. Repeat with the API 35/JDK 17 toolchain from [BUILD_MD](BUILD_MD.md):
 
 ```sh
 python3 scripts/build_md.py --test-only --sdk "$ANDROID_SDK_ROOT" \
@@ -121,6 +129,6 @@ python3 scripts/build_md.py --test-only --sdk "$ANDROID_SDK_ROOT" \
 
 Preserved pre-call evidence is retained under `research/unified-magisk-r8-20261015/`. Final3 checkpoint: `final-release3/FINAL.json`, `deployment3/RESULT.json`, `reboot3/after-state.txt`, `services/final3-pcm-usb/pcm-result.json`, and `services/final3-screen-microphone-loop/{manual-trigger.json,mic-probe-result.json,recognition-02.png}`. Earlier: `final-release2/FINAL.json`, `deployment/magisk-install.txt`, `reboot/after-state.txt`, `services/final-pcm-usb3/pcm-result.json`, `services/final-navigation-usb/navigation-result.json`, and failed/unverified `services/final-screen-microphone*` logs. Each USB run also has its receiver summary. Research remains in `honda-services`, `navigation-evidence`, `phone-services`; offline results include `honda-vr-stop-tests` and `final-md3/manifest.json`. Honda RH00468A is not assumed identical to the owner's RH00457A firmware. Vendor sources and device dumps are not bundled with the installer.
 
-Independent multitouch still requires the HU to send independent pointer coordinates. Honda's 60 FPS mode previously lagged severely; the default remains **Requested by head unit**. New cold-boot speedup, foreground navigation, physical cluster output, SIM/VoIP calls, fresh-device install and full automotive acceptance remain unverified. The scoped release2/release3 PASS results above do not close them. The earlier [services design](CARLIFE_SERVICES.md), [first audio candidate](AUDIO_CANDIDATE.md) and [r6/mic-test4 record](NATIVE_CANDIDATE.md) are historical documents, not the current feature checklist.
+Independent multitouch still requires the HU to send independent pointer coordinates. Honda's 60 FPS mode previously lagged severely; the default remains **Requested by head unit**. At the lab2 checkpoint, cold-boot speedup, foreground navigation, physical cluster output, SIM/VoIP calls, fresh-device install and full automotive acceptance were unverified. The scoped release2/release3 PASS results above did not close them; later boot/reconnect checks are recorded in the v0.2 validation linked above. The earlier [services design](CARLIFE_SERVICES.md), [first audio candidate](AUDIO_CANDIDATE.md) and [r6/mic-test4 record](NATIVE_CANDIDATE.md) are historical documents, not the current feature checklist.
 
 The former source-only 55-suite endpoint candidate has been superseded by the integrated 56-suite lab2 package above. Its historical report remains unchanged. The completed Mac regression and continuous-fixture reopen have separate exact results; later Honda/real-call acceptance must retain its own hashes and verdicts.

@@ -117,13 +117,13 @@ except subprocess.TimeoutExpired:
             self.assertEqual(out.stdout.count('stage=write rc=124'), 1)
             self.assertTrue(out.stdout.endswith('CONTINUED\n'))
 
-    def test_startup_order_does_not_depend_on_hu_or_usb(self):
+    def test_scheduling_is_only_after_owner_admission_and_not_a_usb_gate(self):
         claim = TEXT.index('claim_owner ||')
-        bootstrap = TEXT.index('\nbootstrap_qcom_main_once\n', claim)
-        self.assertLess(TEXT.index('phase BOOTSTRAP ||', claim), bootstrap)
-        self.assertLess(bootstrap, TEXT.index('while ! stop_requested', claim))
-        self.assertLess(bootstrap, TEXT.index('start_md ||', claim))
-        self.assertEqual(TEXT.count('\nbootstrap_qcom_main_once\n'), 1)
+        fallback = TEXT.index('\nbootstrap_qcom_main_if_due\n', claim)
+        self.assertLess(TEXT.index('phase BOOTSTRAP ||', claim), fallback)
+        self.assertLess(fallback, TEXT.index('while ! stop_requested', claim))
+        client_actions = TEXT[TEXT.index('if [ "$ACTION" = status ]; then'):claim]
+        self.assertNotIn('bootstrap_qcom_main_', client_actions)
         helper = '\n'.join(line for line in function('bootstrap_qcom_main_once').splitlines() if not line.lstrip().startswith('#'))
         for forbidden in ['sys.usb', 'persist.', 'ctl.', 'sdAutoReverse ', 'sdCarplaySvc ', 'sys.boot_completed', 'start vendor.', 'stop vendor.']:
             self.assertNotIn(forbidden, helper)

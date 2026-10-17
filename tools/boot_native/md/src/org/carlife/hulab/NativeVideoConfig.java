@@ -25,6 +25,10 @@ final class NativeVideoConfig {
         if(cliMode==null&&cliRate==null)return this;
         return checked(cliMode==null?mode:cliMode,cliRate==null?rate:cliRate,provenance+"+cli");
     }
+    /** The boot controller supplies fallback CLI values; a valid owner selection takes precedence. */
+    NativeVideoConfig bootDefaults(String cliMode,String cliRate)throws IOException{
+        return provenance.equals("saved")?this:override(cliMode,cliRate);
+    }
     int fps(int hint){return rate.equals("auto")?NativeSessionProtocol.fps(hint):Integer.parseInt(rate);}
     VideoMode requested(int width,int height,int hint)throws IOException{
         int fps=fps(hint);

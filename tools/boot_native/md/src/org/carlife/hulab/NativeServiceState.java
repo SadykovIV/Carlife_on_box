@@ -13,6 +13,8 @@ final class NativeServiceState {
     private List<Integer> capabilityRequest;
     private byte[] media;private int position;private long lastProgress=-1;
     private int microphoneConsumers,voiceConsumers;
+    private long lastWrittenVrRunning=-1,lastWrittenVrIdle=-1;
+    static final long VOICE_CONTROL_ECHO_MS=1500;
     private YandexNotificationRoute.Turn route;
     private int maneuverDistance;private long lastRouteSent=-1;private boolean urgentRoute;
     private byte[] lastRouteContent;
@@ -89,6 +91,32 @@ final class NativeServiceState {
     synchronized void callMicrophone(boolean wanted){microphoneConsumer(4,wanted);}
     synchronized boolean nonCallMicrophoneIdle(){return (microphoneConsumers&3)==0;}
     synchronized boolean voiceModuleActive(){return !closed&&voiceConsumers!=0;}
+    /** HeadSwap documents HUs reflecting our VR_RUNNING as MODULE_CONTROL VR=1.
+     * Start the short echo window only after a real successful USB write, not
+     * while a coalesced state is still pending. Explicit hardkeys bypass it. */
+    synchronized void outputWritten(int id,byte[] payload,long now){
+        if(closed||now<0)return;
+        if(id==0x10024||id==0x10023){
+            MdMain.logFields("native_mic_command_written","active",id==0x10024,"message_id",id,"written_uptime_ms",now);
+            return;
+        }
+        if(id!=0x10026)return;
+        try{
+            Map<Integer,Object> list=MdMain.Proto.parse(payload);
+            Object nested=list.get(2);
+            if(!(nested instanceof byte[]))return;
+            Map<Integer,Object> module=MdMain.Proto.parse((byte[])nested);
+            int state=MdMain.Proto.number(module,2,-1);
+            if(MdMain.Proto.number(module,1,-1)==4&&(state==0||state==1))voiceStatusWritten(state==1,now);
+        }catch(IOException ignored){/* A malformed or unrelated status cannot arm the guard. */}
+    }
+    synchronized void voiceStatusWritten(boolean active,long now){if(!closed&&now>=0){if(active)lastWrittenVrRunning=now;else lastWrittenVrIdle=now;MdMain.logFields("native_voice_status_written","active",active,"written_uptime_ms",now);}}
+    synchronized boolean voiceStartEcho(long now){return voiceControlEcho(1,now);}
+    synchronized boolean voiceControlEcho(int state,long now){
+        if(closed||(state!=0&&state!=1))return false;
+        long sent=state==1?lastWrittenVrRunning:lastWrittenVrIdle;
+        return sent>=0&&now>=sent&&now-sent<VOICE_CONTROL_ECHO_MS;
+    }
     synchronized Output poll(){return poll(System.nanoTime()/1000000L);}
     synchronized Output poll(long now){
         if(closed)return null;
@@ -106,7 +134,7 @@ final class NativeServiceState {
         }
         return null;
     }
-    synchronized void close(){closed=true;pending.clear();route=null;media=null;microphoneConsumers=0;voiceConsumers=0;}
+    synchronized void close(){closed=true;pending.clear();route=null;media=null;microphoneConsumers=0;voiceConsumers=0;lastWrittenVrRunning=-1;lastWrittenVrIdle=-1;}
     private void replayMedia()throws IOException {if(musicSubscribed&&musicAvailable&&playing&&media!=null){put(INFO,media);put(PROGRESS,MdMain.Proto.ints(1,position));}}
     private void replayRoute()throws IOException {
         if(!naviSubscribed||!naviAvailable)return;

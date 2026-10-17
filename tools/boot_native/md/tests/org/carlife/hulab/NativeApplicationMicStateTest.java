@@ -53,6 +53,26 @@ public final class NativeApplicationMicStateTest {
         partial.applicationMicrophone(true);vr(partial,1);output(partial,0x10024);empty(partial);
         partial.applicationMicrophone(false);output(partial,0x10023);vr(partial,0);
         partial.applicationMicrophone(true);vr(partial,1);output(partial,0x10024);empty(partial);
+        NativeServiceState echo=new NativeServiceState();
+        check(!echo.voiceStartEcho(0),"first real HU voice request is not mistaken for boot-time echo");
+        echo.applicationMicrophone(true);NativeServiceState.Output running=output(echo,0x10026);
+        check(!echo.voiceStartEcho(100),"queued or selected VR_RUNNING is not proof of a successful write");
+        echo.outputWritten(running.id,running.payload,100);
+        check(echo.voiceStartEcho(100)&&echo.voiceStartEcho(1599),"own written VR_RUNNING bounds the upstream 1500ms echo window");
+        check(!echo.voiceStartEcho(1600)&&!echo.voiceStartEcho(99),"late or backwards-time input is not an echo");
+        echo.outputWritten(0x10024,new byte[0],1000);
+        echo.outputWritten(0x10026,MdMain.Session.moduleStatus(3,true),1000);
+        echo.outputWritten(0x10026,new byte[]{18,3,8},1000);
+        check(!echo.voiceStartEcho(1600),"MIC, MUSIC and malformed outputs never extend VR echo suppression");
+        echo.outputWritten(0x10026,MdMain.Session.moduleStatus(4,false),150);
+        check(echo.voiceStartEcho(200),"a late reflected VR1 after our VR0 still cannot reopen the assistant");
+        check(echo.voiceControlEcho(0,1269),"Honda observed VR0 reflection1119ms after MIC_END is not an explicit cancel");
+        check(echo.voiceControlEcho(0,1321),"Honda observed VR0 reflection1171ms after MIC_END is ignored");
+        check(!echo.voiceControlEcho(0,1650)&&!echo.voiceControlEcho(3,151),"late stop and explicit close status3 retain normal dispatch");
+        check(!new NativeServiceState().voiceControlEcho(0,150),"a real stop without our preceding VR0 is never suppressed");
+        echo.close();echo.outputWritten(running.id,running.payload,200);
+        check(!echo.voiceStartEcho(201),"closed logical session ignores a delayed write completion");
+        check(!new NativeServiceState().voiceStartEcho(201),"new logical session has no inherited echo window");
         s.close();s.applicationMicrophone(true);s.applicationMicrophone(false);empty(s);check(!s.voiceModuleActive(),"closed state cannot restart");
         System.out.println("NativeApplicationMicStateTest PASS "+checks+" checks; no Honda hardware acceptance");
     }

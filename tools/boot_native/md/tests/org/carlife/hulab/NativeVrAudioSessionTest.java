@@ -48,7 +48,8 @@ public final class NativeVrAudioSessionTest {
             check(MdMain.Proto.number(init,1,0)==16000&&MdMain.Proto.number(init,2,0)==1&&MdMain.Proto.number(init,3,0)==16,"VR actual capture and declared PCM are16k mono16bit");
 
             final Fixture live=new Fixture(true);live.players.defer=true;live.session.maybeStartAudio();
-            check(live.platform.registers==0&&!live.session.playback.assistantActive(),"unknown playback cannot seize assistant lane");
+            await(new Callable<Boolean>(){public Boolean call(){return live.session.audio.active();}},"unknown playback warms only MEDIA capture");
+            check(live.platform.registers==1&&!live.session.playback.assistantActive()&&live.session.assistant.retired()&&live.session.speech.retired()&&live.session.audio.queue.size()==0&&live.session.assistant.queue.size()==0&&live.session.speech.queue.size()==0,"unknown playback opens no MEDIA wire and cannot seize assistant or speech lane");
             live.players.emit(set(1),set(2),set(3));
             await(new Callable<Boolean>(){public Boolean call(){return live.session.audio.queue.size()==3&&live.session.speech.queue.size()==3&&live.session.assistant.queue.size()==3;}},"three independently formatted workers captured two chunks each");
             check(live.platform.registers==1&&live.platform.records.size()==3,"one policy registers all three disjoint sinks once");

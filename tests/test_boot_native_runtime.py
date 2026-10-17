@@ -88,18 +88,39 @@ observe_udc 'not attached' 199; [ "$DETACH_CONFIRMED" = 1 ] || exit 3
 observe_udc suspended 200; [ "$DETACH_CONFIRMED" = 0 ]''','DETACH_ARMED=0; DETACH_SINCE=0')
         self.assertEqual(p.returncode,0,p.stderr)
 class RecoveryTests(unittest.TestCase):
-    def test_exit_before_udc_detach_does_not_abort_rearm(self):
-        p=shell(['recovery_reason'],'''tick=1000; recovery_reason; [ "$RECOVERY_REASON" = NONE ] || exit 1
-tick=1149; recovery_reason; [ "$RECOVERY_REASON" = NONE ] || exit 2
-DETACH_CONFIRMED=1; tick=1150; recovery_reason; [ "$RECOVERY_REASON" = DETACH ]''',
+    def test_proven_exit_rearms_on_first_observation_without_detach(self):
+        # No tick or elapsed interval is needed after irreversible child exit.
+        p=shell(['recovery_reason'],'''recovery_reason || exit 81
+[ "$RECOVERY_REASON" = MD_EXIT ]''',
+            'PHASE=ACCESSORY_CONNECTED; DETACH_CONFIRMED=0; MD_EXIT_SINCE=0; identity() { return 2; }; child_exited() { return 0; }')
+        self.assertEqual(p.returncode,0,p.stderr)
+    def test_confirmed_detach_keeps_priority_without_md_exit(self):
+        p=shell(['recovery_reason'],'''recovery_reason || exit 81
+[ "$RECOVERY_REASON" = DETACH ]''',
+            'PHASE=ACCESSORY_CONNECTED; DETACH_CONFIRMED=1; identity() { echo UNEXPECTED_IDENTITY; return 1; }; child_exited() { echo UNEXPECTED_EXIT; return 1; }')
+        self.assertEqual(p.returncode,0,p.stderr);self.assertEqual(p.stdout,'')
+    def test_live_md_does_not_rearm_or_check_exit(self):
+        p=shell(['recovery_reason'],'''recovery_reason || exit 81
+[ "$RECOVERY_REASON" = NONE ] && [ "$MD_EXIT_SINCE" = 0 ]''',
+            'PHASE=ACCESSORY_CONNECTED; DETACH_CONFIRMED=0; MD_EXIT_SINCE=500; identity() { return 0; }; child_exited() { echo UNEXPECTED_EXIT; return 1; }')
+        self.assertEqual(p.returncode,0,p.stderr);self.assertEqual(p.stdout,'')
+    def test_identity_failure_without_proven_exit_never_rearms(self):
+        for identity_code in [1,2,73]:
+            with self.subTest(identity_code=identity_code):
+                p=shell(['recovery_reason'],'''recovery_reason; rc=$?
+[ "$rc" != 0 ] && [ "$RECOVERY_REASON" = NONE ]''',
+                    f'PHASE=ACCESSORY_CONNECTED; DETACH_CONFIRMED=0; MD_EXIT_SINCE=0; identity() {{ return {identity_code}; }}; child_exited() {{ return 1; }}')
+                self.assertEqual(p.returncode,0,p.stderr)
+    def test_discovery_phase_does_not_use_md_exit_recovery(self):
+        p=shell(['recovery_reason'],'''recovery_reason || exit 81
+[ "$RECOVERY_REASON" = NONE ]''',
+            'PHASE=USB_DISCOVERY; DETACH_CONFIRMED=0; identity() { echo UNEXPECTED_IDENTITY; return 1; }; child_exited() { echo UNEXPECTED_EXIT; return 0; }')
+        self.assertEqual(p.returncode,0,p.stderr);self.assertEqual(p.stdout,'')
+    def test_missing_process_proven_exit_is_also_immediate(self):
+        p=shell(['recovery_reason'],'''recovery_reason || exit 81
+[ "$RECOVERY_REASON" = MD_EXIT ]''',
             'PHASE=ACCESSORY_CONNECTED; DETACH_CONFIRMED=0; MD_EXIT_SINCE=0; identity() { return 1; }; child_exited() { return 0; }')
         self.assertEqual(p.returncode,0,p.stderr)
-    def test_only_proven_exit_after_bound_restarts_not_identity_error(self):
-        setup='PHASE=ACCESSORY_CONNECTED; DETACH_CONFIRMED=0; MD_EXIT_SINCE=0; identity() { return 1; }; child_exited() { return 0; }'
-        p=shell(['recovery_reason'],'tick=50; recovery_reason; tick=200; recovery_reason; [ "$RECOVERY_REASON" = MD_EXIT ]',setup)
-        self.assertEqual(p.returncode,0,p.stderr)
-        p=shell(['recovery_reason'],'tick=200; recovery_reason',setup+'; child_exited() { return 1; }')
-        self.assertNotEqual(p.returncode,0)
 class TerminalSessionRecoveryTests(unittest.TestCase):
     SETUP='''
 G=/nonexistent/mock-gadget; R=/nonexistent/mock-runtime
@@ -134,6 +155,21 @@ configure_discovery() { echo publish-mtp; PHASE=USB_DISCOVERY; }
 [ "$rc" != 0 ] && [ "$RECOVERY_FAILURE" = MD_EXIT_STATUS ] && [ "$GENERATION" = 4 ]''',code=71)
         self.assertEqual(p.returncode,0,p.stderr)
         self.assertEqual(p.stdout.splitlines(),['exited-md'])
+    def test_immediate_reason_still_requires_successful_exact_child_exit(self):
+        for code in [0,71]:
+            with self.subTest(code=code):
+                p=shell(['recovery_reason','rearm_discovery'],f'''sh -c 'exit {code}' & MD=$!
+recovery_reason || exit 81
+[ "$RECOVERY_REASON" = MD_EXIT ] || exit 82
+rearm_discovery "$RECOVERY_REASON"
+''',self.SETUP+'\nDETACH_CONFIRMED=0; identity() { return 2; }')
+                if code==0:
+                    self.assertEqual(p.returncode,0,p.stderr)
+                    self.assertIn('publish-mtp',p.stdout)
+                    self.assertLess(p.stdout.index('stop-observer'),p.stdout.index('write-UDC-'))
+                else:
+                    self.assertNotEqual(p.returncode,0)
+                    self.assertNotIn('write-',p.stdout);self.assertNotIn('start-',p.stdout)
     def test_live_child_or_foreign_saved_pid_is_not_waited_or_rearmed(self):
         for stub in ['child_exited() { return 1; }',
                      'child_exited() { ce_pid=999999; return 0; }']:
@@ -196,6 +232,7 @@ physical_profile() { echo profile-$1; }; oem_absent() { echo no-oem; }; identity
 stop_child() { echo stop-$1; [ "$1" = observer ]; }; atomic() { echo intent; }; log() { echo log; }
 write_node() { echo write-${1##*/}-$2; }; read_is() { :; }; accessory_unchanged() { :; }; clear_known_links() { echo clear-links; }
 b() { [ "$1" = ln ] || exit 91; echo link-$3; }; phase() { echo phase-$1; }
+bootstrap_qcom_main_once() { :; }; sample_now_ms() { SAMPLED_NOW_MS=10000; }
 ''')
         self.assertEqual(p.returncode,0,p.stderr)
         lines=p.stdout.splitlines();self.assertNotIn('stop-md',lines)
@@ -239,6 +276,7 @@ physical_profile() { return 0; }; oem_absent() { return 0; }; identity() { retur
 stop_child() { [ "$1" = observer ]; }; atomic() { return 0; }; log() { return 0; }
 write_node() { return 0; }; read_is() { return 0; }; accessory_unchanged() { return 0; }; clear_known_links() { return 0; }
 b() { [ "$1" = ln ]; }; phase() { PHASE=$1; }
+bootstrap_qcom_main_once() { :; }; sample_now_ms() { SAMPLED_NOW_MS=10000; }
 '''
     def run_state(self,body):
         return shell(['number','observe_udc','recovery_reason','enter_accessory'],body,self.SETUP)
@@ -324,7 +362,8 @@ identity() {{ printf 'published\n' > "$R/aoa-start"; return 1; }}; child_exited(
 observer_completed() {{ printf 'complete\n' > "$R/aoa-start"; }}
 kernel_start_ok() {{ [ "$(cat "$R/aoa-start")" = complete ]; }}
 physical_profile() {{ :; }}; oem_absent() {{ :; }}; identity() {{ :; }}; stop_child() {{ :; }}; atomic() {{ :; }}; log() {{ :; }}
-write_node() {{ echo WRITE; }}; read_is() {{ :; }}; accessory_unchanged() {{ :; }}; clear_known_links() {{ :; }}; b() {{ :; }}; phase() {{ :; }}'''
+write_node() {{ echo WRITE; }}; read_is() {{ :; }}; accessory_unchanged() {{ :; }}; clear_known_links() {{ :; }}; b() {{ :; }}; phase() {{ :; }}
+bootstrap_qcom_main_once() {{ :; }}; sample_now_ms() {{ SAMPLED_NOW_MS=10000; }}'''
             p=shell(['advance_discovery','enter_accessory'],'advance_discovery',setup)
             self.assertEqual(p.returncode,0,p.stderr);self.assertEqual(p.stdout.splitlines(),['WRITE']*3)
     def test_complete_but_wrong_nonce_marker_cannot_publish_usb(self):
@@ -339,10 +378,12 @@ observer_completed() {{ :; }}; owned_file() {{ :; }}; read_is() {{ [ "$(cat "$1"
         for code,expected in [(0,0),(79,1)]:
             with self.subTest(code=code):
                 p=shell(['observer_completed'],'observer_completed',f'''sh -c 'exit {code}' & OBS=$!
-identity() {{ return 1; }}; child_exited() {{ return 0; }}''')
+identity() {{ return 1; }}; child_exited() {{ return 0; }}
+bootstrap_qcom_main_if_due() {{ :; }}''')
                 self.assertEqual(p.returncode,expected,p.stderr)
     def test_completion_does_not_wait_on_unproven_live_or_foreign_identity(self):
         p=shell(['observer_completed'],'observer_completed','''OBS=123
+bootstrap_qcom_main_if_due() { :; }
 identity() { return 1; }; child_exited() { return 1; }; wait() { echo UNEXPECTED_WAIT; }; sleep() { echo UNEXPECTED_SLEEP; }''')
         self.assertNotEqual(p.returncode,0);self.assertEqual(p.stdout,'')
 class ResolverRecordTests(unittest.TestCase):

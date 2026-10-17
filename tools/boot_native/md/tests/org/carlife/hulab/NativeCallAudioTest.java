@@ -9,6 +9,52 @@ public final class NativeCallAudioTest {
     static void check(boolean ok,String label){checks++;if(!ok)throw new AssertionError(label);}
     interface Action {void run()throws Exception;}
     static void fails(Action action,String label)throws Exception {try{action.run();throw new AssertionError(label);}catch(IOException expected){checks++;}}
+    static void startFails(Action action,String label)throws Exception {try{action.run();throw new AssertionError(label);}catch(IllegalStateException expected){checks++;}}
+    static NativeCallAudio.PstnStartCheck gate(int mode,int state,int play,int usage,int flags,int delay,
+            boolean present,boolean waiting,boolean allowed,String phone,String owner,String caller){
+        return new NativeCallAudio.PstnStartCheck(mode,state,play,usage,flags,delay,present,waiting,allowed,phone,owner,caller);
+    }
+    static NativeCallAudio.PstnStartCheck blocked(){return gate(2,1,1,17,0x10800,0,true,false,false,"1","com.android.phone","app_process");}
+    static final class StartFake implements NativeCallAudio.UplinkStarter {
+        int playState=1,mode=2,plays,inspects,starts,reports;
+        boolean normalWorks,compatWorks=true,modeChangesAtStart,gateChanges;
+        NativeCallAudio.PstnStartCheck check=blocked();
+        public void play(){plays++;if(normalWorks)playState=3;}
+        public int playState(){return playState;}
+        public int mode(){return mode;}
+        public NativeCallAudio.PstnStartCheck inspect(){inspects++;return gateChanges&&inspects>1?null:check;}
+        public void startAuthorizedCallImpl(){starts++;if(compatWorks)playState=3;if(modeChangesAtStart)mode=0;}
+        public void report(String state,NativeCallAudio.PstnStartCheck check){reports++;}
+    }
+    static void pstnStartCompatibility()throws Exception {
+        check(blocked().eligible(false),"known OEM package exclusion permits only owned PSTN call track compatibility");
+        for(int mode:new int[]{0,1,3,6})check(!gate(mode,1,1,17,0x10800,0,true,false,false,"1","phone","md").eligible(false),"not PSTN "+mode);
+        check(!gate(2,0,1,17,0x10800,0,true,false,false,"1","phone","md").eligible(false),"uninitialized rejected");
+        check(!gate(2,1,3,17,0x10800,0,true,false,false,"1","phone","md").eligible(false),"already playing not compatibility target");
+        check(!gate(2,1,2,17,0x10800,0,true,false,false,"1","phone","md").eligible(false),"initial start does not accept paused state");
+        check(gate(2,1,2,17,0x10800,0,true,false,false,"1","phone","md").eligible(true),"owned flush can resume paused track");
+        for(int usage:new int[]{1,2,16})check(!gate(2,1,1,usage,0x10800,0,true,false,false,"1","phone","md").eligible(false),"ordinary media/voice/assistant not bypassed "+usage);
+        check(!gate(2,1,1,17,0x800,0,true,false,false,"1","phone","md").eligible(false),"call redirection flag required");
+        check(!gate(2,1,1,17,0x10800,300,true,false,false,"1","phone","md").eligible(false),"legitimate delayed start not bypassed");
+        check(!gate(2,1,1,17,0x10800,0,false,false,false,"1","phone","md").eligible(false),"unknown OEM implementation rejected");
+        check(!gate(2,1,1,17,0x10800,0,true,true,false,"1","phone","md").eligible(false),"pending OEM start not duplicated");
+        check(!gate(2,1,1,17,0x10800,0,true,false,true,"1","phone","md").eligible(false),"gate must actually refuse");
+        check(!gate(2,1,1,17,0x10800,0,true,false,false,"0","phone","md").eligible(false),"inactive property rejected");
+        check(!gate(2,1,1,17,0x10800,0,true,false,false,"1","","md").eligible(false),"missing phone owner rejected");
+        check(!gate(2,1,1,17,0x10800,0,true,false,false,"1","phone",null).eligible(false),"unknown caller rejected");
+        check(!gate(2,1,1,17,0x10800,0,true,false,false,"1","phone","phone").eligible(false),"same owner not OEM exclusion");
+        StartFake normal=new StartFake();normal.normalWorks=true;NativeCallAudio.startOwnedUplink(normal,false);
+        check(normal.plays==1&&normal.inspects==0&&normal.starts==0,"normal platform start remains first and sole path when it works");
+        StartFake compatible=new StartFake();NativeCallAudio.startOwnedUplink(compatible,false);
+        check(compatible.plays==1&&compatible.inspects==2&&compatible.starts==1&&compatible.playState==3,"compatibility starts same track once after fresh gate recheck");
+        StartFake unsupported=new StartFake();unsupported.check=null;startFails(()->NativeCallAudio.startOwnedUplink(unsupported,false),"missing OEM support remains failure");check(unsupported.starts==0,"unknown wrapper not invoked");
+        StartFake changed=new StartFake();changed.gateChanges=true;startFails(()->NativeCallAudio.startOwnedUplink(changed,false),"gate changed before start");check(changed.starts==0,"changed gate not bypassed");
+        StartFake idle=new StartFake();idle.mode=0;startFails(()->NativeCallAudio.startOwnedUplink(idle,false),"actual call mode rechecked");check(idle.starts==0,"inactive mode cannot start");
+        StartFake fail=new StartFake();fail.compatWorks=false;startFails(()->NativeCallAudio.startOwnedUplink(fail,false),"compatibility does not mask stopped track");
+        StartFake ended=new StartFake();ended.modeChangesAtStart=true;startFails(()->NativeCallAudio.startOwnedUplink(ended,false),"call ending during start remains failure");
+        StartFake flush=new StartFake();flush.playState=2;flush.check=gate(2,1,2,17,0x10800,0,true,false,false,"1","phone","md");
+        NativeCallAudio.startOwnedUplink(flush,true);check(flush.starts==1&&flush.playState==3,"mute flush resumes through same verified path");
+    }
     static final class Fake implements NativeCallAudio.Platform {
         int mode,opens,reads,writes,downClosed,upClosed,flushes,downStarts,upStarts;
         boolean muted,failUp,failDownStart,failUpStart,failDownClose,failUpClose,failWrite,failRead,failMode,failMute,failFlush,uncertainOpen;
@@ -29,6 +75,7 @@ public final class NativeCallAudioTest {
         };}
     }
     public static void main(String[] args)throws Exception {
+        pstnStartCompatibility();
         Fake idle=new Fake();NativeCallAudio off=new NativeCallAudio(idle,new SourceLease());
         check(off.openForCurrentMode()==0&&idle.opens==0,"NORMAL creates no endpoint");
         idle.mode=1;check(off.openForCurrentMode()==0&&idle.opens==0,"RINGTONE is not a connected call");off.close();

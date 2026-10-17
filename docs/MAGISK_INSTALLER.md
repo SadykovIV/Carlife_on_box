@@ -1,14 +1,14 @@
 # TBox Ultra: one Magisk ZIP for installation and updates
 
-**THIS BUILD HAS NOT BEEN TESTED WITH AN AUTOMOTIVE HEAD UNIT.** This is a prerelease for testing; earlier Honda results do not establish acceptance of this build.
+**Development prerelease:** Honda bench startup/reconnect acceptance applies to the preceding runtime baseline. This ZIP also includes a host-tested cleanup change; complete in-car audio/call and exact-ZIP device acceptance is still pending.
 
 [Русский](ru/MAGISK_INSTALLER.md) · [Short instructions](INSTALL_RELEASE.md) · [Service status](CARLIFE_SERVICES_STATUS.md)
 
-The current [prerelease](<https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.16-usb-call-lab2>) is **`Carlife_on_box-TBox-Ultra-2026.10.16-usb-call-lab2.zip`**. Use this one file for initial installation or update. It detects the supported installation already on the box and includes OEM settings integration; no separate settings or rollback ZIP is needed.
+The current [prerelease](<https://github.com/SadykovIV/Carlife_on_box/releases/tag/v2026.10.17>) is **`Carlife_on_box-TBox-Ultra-2026.10.17-v0.2.zip`**. Use this one file for initial installation or update. It detects the supported installation already on the box and includes OEM settings integration; no separate settings or rollback ZIP is needed.
 
-SHA256: `957c5b2a8a471aced1d6349c29d764f52dde95bcbf12557b67b8941381dae0b4`.
+SHA256: `bc25a436996a52a43932d984e7a4ffc8e04ca43d9b50a6755d5823b5bda7f6ea`.
 
-The development-box update and ordinary reboot passed. **56 JVM suites and 133 host tests passed.** Mac USB checks covered generated MEDIA/TTS/VR, application microphone injection, synthetic duplex call audio, mute/unmute, return to music, native RESET and reconnect. Call audio uses USB, without a Bluetooth dependency. See [exact results](CARLIFE_SERVICES_STATUS.md). **Real SIM/VoIP calls, the physical HU microphone, automotive acceptance of this build and clean installation on a second physical TBox remain unverified.**
+The MD is byte-identical to the tested Honda baseline. **57 JVM suites, 167 boot-controller tests and package rollback regressions passed.** Cold baseline: first IDR at21.7 seconds of Android uptime; hot reconnect: owner estimate5–7 seconds after plugging in. The final release adds bounded controller cleanup, tested offline. See the [validation record](RELEASE_0_2_VALIDATION.md). Real SIM/VoIP duplex, complete assistant speech and clean installation on a second physical box remain unverified.
 
 ## Supported devices
 
@@ -18,7 +18,7 @@ Initial installation requires working **Magisk 30.7+ / root**, an already unlock
 
 ## Install or update
 
-1. Copy `Carlife_on_box-TBox-Ultra-2026.10.16-usb-call-lab2.zip` to the box. When downloaded from a release, verify SHA256 against its `SHA256SUMS`.
+1. Copy `Carlife_on_box-TBox-Ultra-2026.10.17-v0.2.zip` to the box. When downloaded from a release, verify SHA256 against its `SHA256SUMS`.
 2. Keep stable power connected. Open **Magisk → Modules → Install from storage**, select the ZIP and wait for success.
 3. Reboot once. The existing OEM settings provide **Android Auto / CarPlay / Baidu CarLife** and CarLife resolution/FPS. A fresh installation defaults to **Baidu CarLife** and video **Requested by head unit**; updates preserve saved choices.
 4. Connect to a ready CarLife HU. Current audio, voice, navigation and call limitations are in [service status](CARLIFE_SERVICES_STATUS.md).

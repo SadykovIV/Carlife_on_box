@@ -12,8 +12,19 @@ public final class NativeSplitAudioSessionTest {
         boolean defer;
         public void start(PlaybackActivity.Observer o){observer=o;if(!defer)emit(lastOutput,lastMedia);}
     }
+    static final class Platform extends SplitAudioSourceTest.Platform {
+        volatile boolean mediaDrained;
+        public PcmAudioSession.Source open(final CarLifeAudio.Lane lane)throws Exception{
+            final PcmAudioSession.Source delegate=super.open(lane);
+            return new PcmAudioSession.Source(){
+                public void start()throws Exception{delegate.start();}
+                public int read(byte[] b,int offset,int size)throws Exception{int n=delegate.read(b,offset,size);if(lane==CarLifeAudio.Lane.MEDIA&&n==0)mediaDrained=true;return n;}
+                public void close()throws Exception{delegate.close();}
+            };
+        }
+    }
     static final class Fixture {
-        final SplitAudioSourceTest.Platform platform=new SplitAudioSourceTest.Platform();
+        final Platform platform=new Platform();
         final SourceLease global=new SourceLease();
         final AudioPolicySources policy=SplitAudioSourceTest.owner(platform,global);
         final NativeAudioSessionTest.Memory wire=new NativeAudioSessionTest.Memory();
@@ -39,12 +50,19 @@ public final class NativeSplitAudioSessionTest {
     public static void main(String[] args)throws Exception{
         MdMain.bootNative=true;MdMain.videoSource="mediacodec";MdMain.audioSource="split";android.os.SystemClock.fixedTime=1000;
         final Fixture idle=new Fixture();idle.players.defer=true;idle.session.maybeStartAudio();
-        check(idle.platform.registers==0&&idle.session.audio.queue.size()==0&&idle.session.speech.queue.size()==0,"no initial snapshot cannot seize MEDIA or TTS");
-        idle.players.emit(new int[0],new int[0]);check(idle.platform.registers==0,"known idle creates no audio route");
-        idle.players.emit(new int[]{1},new int[]{1});await(new Callable<Boolean>(){public Boolean call(){return idle.session.audio.active();}},"media-only snapshot starts MEDIA");
+        await(new Callable<Boolean>(){public Boolean call(){return idle.session.audio.active()&&idle.platform.mediaDrained;}},"unknown playback warms and drains MEDIA capture");
+        check(idle.platform.registers==1&&idle.session.audio.queue.size()==0&&idle.session.speech.queue.size()==0,"unknown playback emits no MEDIA/TTS INIT or PCM despite ready MEDIA capture");
+        idle.writer();idle.session.send(1,0x1001b,new byte[0]);
+        await(new Callable<Boolean>(){public Boolean call()throws Exception{return firstId(packets(idle.wire),0x1001b)>=0;}},"writer passed unknown-playback control barrier");
+        check(firstId(packets(idle.wire),0x30001)<0&&firstId(packets(idle.wire),0x30006)<0&&firstId(packets(idle.wire),0x40001)<0,"unknown playback never seizes HU audio on actual writer");
+        idle.players.emit(new int[0],new int[0]);idle.session.send(1,0x10018,new byte[0]);
+        await(new Callable<Boolean>(){public Boolean call()throws Exception{return firstId(packets(idle.wire),0x10018)>=0;}},"writer passed known-idle control barrier");
+        check(idle.platform.registers==1&&idle.platform.unregisters==0&&idle.session.audio.queue.size()==0&&firstId(packets(idle.wire),0x30001)<0&&firstId(packets(idle.wire),0x30006)<0,"known idle retains one warm route without INIT/DATA on wire");
+        idle.players.emit(new int[]{1},new int[]{1});await(new Callable<Boolean>(){public Boolean call()throws Exception{return idle.session.audioWireActive&&firstId(packets(idle.wire),0x30006)>=0;}},"media-only snapshot opens MEDIA wire from retained capture");
         check(idle.session.speech.retired()&&idle.session.speech.queue.size()==0,"media-only snapshot does not invent speech");
-        idle.players.emit(new int[]{2},new int[0]);await(new Callable<Boolean>(){public Boolean call(){return idle.session.audio.retired()&&idle.session.speech.active();}},"speech-only snapshot stops MEDIA and starts independent TTS");
-        idle.players.emit(new int[0],new int[0]);await(new Callable<Boolean>(){public Boolean call(){return idle.session.speech.retired()&&idle.policy.retired();}},"fully idle snapshot releases both policy routes");idle.close();
+        idle.players.emit(new int[]{2},new int[0]);await(new Callable<Boolean>(){public Boolean call(){return idle.session.audio.active()&&!idle.session.audioWireActive&&idle.session.speech.active();}},"speech-only snapshot closes MEDIA wire, preserves warm capture and starts independent TTS");
+        idle.players.emit(new int[0],new int[0]);await(new Callable<Boolean>(){public Boolean call(){return idle.session.speech.retired()&&!idle.session.speechWireActive&&idle.session.audio.queue.size()==0&&idle.session.speech.queue.size()==0;}},"fully idle snapshot releases TTS and drains its STOP on wire");
+        check(idle.session.audio.active()&&idle.platform.registers==1&&idle.platform.unregisters==0&&idle.session.audio.queue.size()==0&&idle.session.speech.queue.size()==0,"fully idle retains only ready MEDIA, no queued output or policy churn");idle.close();
 
         final Fixture radio=new Fixture();radio.players.lastOutput=new int[]{1,2};radio.players.lastMedia=new int[]{1};radio.session.maybeStartAudio();
         await(new Callable<Boolean>(){public Boolean call(){return radio.session.audio.active()&&radio.session.speech.active();}},"active initial snapshot starts both roles");

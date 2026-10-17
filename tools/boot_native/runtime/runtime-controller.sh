@@ -15,7 +15,19 @@ DETACH_ARMED=0; DETACH_SINCE=0; ATTACH_FAILURES=0; MD_EXIT_SINCE=0
 FLOATING_NAV_ATTEMPTED=0
 QCOM_MAIN_BOOTSTRAP_ATTEMPTED=0
 RUN_STARTED_MS=unknown; PHASE_STARTED_MS=unknown
-b() { timeout -k 1 3 "$@"; }
+b() {
+    # Static Magisk applets avoid Android dynamic-linker startup overhead.
+    # Fall back only if BusyBox is unavailable; never retry a failed mutation.
+    case "${1-}" in
+        cat|stat|sha256sum|find|sort|tr|chmod|mv|rm|ln|grep|mkdir|rmdir)
+            if [ -x /data/adb/magisk/busybox ]; then
+                /data/adb/magisk/busybox timeout -k 1 3 /data/adb/magisk/busybox "$@"
+                return $?
+            fi
+            ;;
+    esac
+    timeout -k 1 3 "$@"
+}
 
 readf() {
     # Fixed kernel scalar attributes only. Keep arbitrary/identity files bounded.
@@ -44,7 +56,27 @@ meta() { b stat -c '%u:%g:%a' "$1"; }
 
 owned_file() { regular "$1" && [ "$(meta "$1")" = "0:0:$2" ]; }
 
-read_is() { ri=$(readf "$1") || return 1; [ "$ri" = "$2" ]; }
+read_is() {
+    # Same fixed scalar whitelist and one-fd validation as readf, but compare
+    # in this shell: no command substitution for a complete single-line value.
+    case "$1" in
+        /proc/sys/kernel/random/boot_id|/config/usb_gadget/g1/UDC|/config/usb_gadget/g2/UDC|/config/usb_gadget/g1/idVendor|/config/usb_gadget/g1/idProduct|/sys/class/udc/a600000.dwc3/state|/sys/class/gpio/gpiochip1124/base|/sys/class/gpio/gpiochip1124/ngpio|/sys/class/gpio/gpiochip1124/label|/sys/class/gpio/gpio1132/direction|/sys/class/gpio/gpio1132/value)
+            ri=; ri_tail=
+            if {
+                IFS= read -r ri && {
+                    IFS= read -r ri_tail; ri_tail_rc=$?
+                    [ "$ri_tail_rc" = 1 ] && [ -z "$ri_tail" ]
+                }
+            } 2>/dev/null < "$1"; then
+                [ "$ri" = "$2" ]; return $?
+            fi
+            ;;
+    esac
+    # Preserve readf's bounded full-file fallback and substitution newline
+    # trimming, including malformed scalar files and non-whitelisted paths.
+    ri=$(b cat "$1") || return 1
+    [ "$ri" = "$2" ]
+}
 
 number() { case "$1" in ''|*[!0-9]*) return 1;; esac; }
 
@@ -56,9 +88,16 @@ now_cs() {
     number "$ct_s" && number "$ct_f" || return 1
     printf '%s\n' "$((ct_s * 100 + 1$ct_f - 100))"
 }
-now_ms() {
-    nm_cs=$(now_cs) || return 1
-    printf '%s\n' "$((nm_cs * 10))"
+sample_now_ms() {
+    # Uptime sample for diagnostics and cooperative QCOM fallback, never a USB gate.
+    # Keep the existing centisecond parser, without command substitutions.
+    SAMPLED_NOW_MS=unknown
+    read snm_up snm_rest < /proc/uptime || return 1
+    snm_s=${snm_up%%.*}; snm_f=${snm_up#*.}00; snm_f=${snm_f%"${snm_f#??}"}
+    number "$snm_s" && number "$snm_f" || return 1
+    # Invalid octal formerly failed inside the substitution, not the owner shell.
+    case "$snm_s" in 0*[89]*) return 1;; esac
+    SAMPLED_NOW_MS=$(((snm_s * 100 + 1$snm_f - 100) * 10))
 }
 observe_udc() {
     # Monotonic centiseconds: crossing an integer second is not a full second.
@@ -84,15 +123,67 @@ fields() {
 }
 cmdhash() { ch=$(b sha256sum "/proc/$1/cmdline") || return 1; printf '%s\n' "${ch%% *}"; }
 
+# identity consumes these results in this shell; keep the bounded inner reads
+# and the original wrappers for all other callers. Strip trailing LF exactly
+# as the removed outer command substitutions did, including malformed output.
+sample_fields() {
+    SAMPLED_FIELDS=
+    sfields_stat=$(readf "/proc/$1/stat") || return 1
+    sfields_stat=${sfields_stat##*) }; set -- $sfields_stat
+    [ "$#" -ge 20 ] || return 1
+    SAMPLED_FIELDS="${20} $4 $3 $1"
+    sfields_lf='
+'
+    while :; do
+        case "$SAMPLED_FIELDS" in *"$sfields_lf") SAMPLED_FIELDS=${SAMPLED_FIELDS%"$sfields_lf"};; *) break;; esac
+    done
+}
+sample_cmdhash() {
+    SAMPLED_CMDHASH=
+    schash_output=$(b sha256sum "/proc/$1/cmdline") || return 1
+    SAMPLED_CMDHASH=${schash_output%% *}
+    schash_lf='
+'
+    while :; do
+        case "$SAMPLED_CMDHASH" in *"$schash_lf") SAMPLED_CMDHASH=${SAMPLED_CMDHASH%"$schash_lf"};; *) break;; esac
+    done
+}
+
 md_command_ok() {
     case "$1" in app_process\ *|app_process64\ *|/system/bin/app_process\ *|/system/bin/app_process64\ *) ;; *) return 1;; esac
     case "$1" in *' org.carlife.hulab.MdMain '*'--transport native-usb'*) return 0;; *) return 1;; esac
 }
 group_matches() {
     gm=$(readf "/proc/$1/cgroup") || return 1
-    [ "$(printf '%s\n' "$gm" | sed -n 's/^0:://p')" = "/carlife-boot-native-$RUN_ID/$2" ] || return 1
+    # Match the two original sed filters and command-substitution LF stripping.
+    # Keep all v2 rows, v1 ordering, blank lines, CR and literal backslashes.
+    gm_lf='
+'
+    gm_rest=$gm; gm_v2=; gm_v1=
+    while :; do
+        case "$gm_rest" in
+            *"$gm_lf"*)
+                gm_line=${gm_rest%%"$gm_lf"*}
+                gm_rest=${gm_rest#*"$gm_lf"}
+                gm_more=1
+                ;;
+            *) gm_line=$gm_rest; gm_more=0;;
+        esac
+        case "$gm_line" in
+            0::*) gm_v2="$gm_v2${gm_line#0::}$gm_lf";;
+            *) gm_v1="$gm_v1$gm_line$gm_lf";;
+        esac
+        [ "$gm_more" = 1 ] || break
+    done
+    while :; do
+        case "$gm_v2" in *"$gm_lf") gm_v2=${gm_v2%"$gm_lf"};; *) break;; esac
+    done
+    [ "$gm_v2" = "/carlife-boot-native-$RUN_ID/$2" ] || return 1
     gv=$(readf "$R/cgroup_v1") || return 1
-    [ "$(printf '%s\n' "$gm" | sed '/^0::/d')" = "$gv" ]
+    while :; do
+        case "$gm_v1" in *"$gm_lf") gm_v1=${gm_v1%"$gm_lf"};; *) break;; esac
+    done
+    [ "$gm_v1" = "$gv" ]
 }
 record_pid() {
     rp_role=$1; rp_pid=$2
@@ -106,11 +197,11 @@ identity() {
     owned_file "$R/$id_role.identity" 600 || return 1
     read ID_PID ID_START ID_HASH id_extra < "$R/$id_role.identity" || return 1
     number "$ID_PID" && number "$ID_START" && [ "$ID_PID" -gt 1 ] && [ -z "$id_extra" ] || return 1
-    idf=$(fields "$ID_PID") || return 1; set -- $idf
+    sample_fields "$ID_PID" || return 1; idf=$SAMPLED_FIELDS; set -- $idf
     [ "$1" = "$ID_START" ] && group_matches "$ID_PID" "$id_role" || return 1
     # A zombie has no live descriptor owner and often no cmdline, but still needs reaping.
     [ "$4" = Z ] && return 2
-    idh=$(cmdhash "$ID_PID") || return 1
+    sample_cmdhash "$ID_PID" || return 1; idh=$SAMPLED_CMDHASH
     [ "$idh" = "$ID_HASH" ]
 }
 pending_pid() {
@@ -199,6 +290,7 @@ observer_ready() {
 }
 wait_observer_ready() {
     for wr_i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        bootstrap_qcom_main_if_due
         identity observer || return 1
         if observer_ready; then return 0; fi
         sleep .05
@@ -218,6 +310,7 @@ start_observer() {
     OBS=$!
     pending_pid observer "$OBS" || { group_empty observer; return 1; }
     for oi in 1 2 3 4 5 6 7 8 9 10; do
+        bootstrap_qcom_main_if_due
         oc=$(b tr '\000' ' ' < "/proc/$OBS/cmdline") || return 1
         case "$oc" in "$V/uevent-watch "*)
             record_pid observer "$OBS" && b rm "$R/observer.pending" && wait_observer_ready
@@ -236,6 +329,7 @@ observer_completed() {
     # Marker is written before exit. Require its successful fsync/close/exit,
     # without sending a signal to interrupt the evidence writer.
     for oe_i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        bootstrap_qcom_main_if_due
         identity observer; oe_identity=$?
         if [ "$oe_identity" != 0 ]; then
             # Exit may occur during the identity read, not only before it.
@@ -273,7 +367,7 @@ log() {
     # /proc/uptime includes suspend; MD uptimeMillis does not. Label the clock
     # explicitly and compare boot stages only before any suspend (10 ms resolution).
     # Timing is diagnostic only: an unavailable clock must not add a new gate.
-    log_ms=$(now_ms) || log_ms=unknown
+    if sample_now_ms; then log_ms=$SAMPLED_NOW_MS; else log_ms=unknown; fi
     log_run_elapsed=unknown; log_phase_elapsed=unknown
     if number "$log_ms"; then
         log_seconds=$((log_ms / 1000))
@@ -284,7 +378,7 @@ log() {
 }
 phase() {
     phase_previous=$PHASE; phase_previous_elapsed=unknown
-    phase_ms=$(now_ms) || phase_ms=unknown
+    if sample_now_ms; then phase_ms=$SAMPLED_NOW_MS; else phase_ms=unknown; fi
     if number "$phase_ms" && number "$PHASE_STARTED_MS" && [ "$phase_ms" -ge "$PHASE_STARTED_MS" ]; then
         phase_previous_elapsed=$((phase_ms-PHASE_STARTED_MS))
     fi
@@ -296,7 +390,7 @@ phase() {
 bootstrap_qcom_main_once() {
     # sdAutoReverse used to request the common Qualcomm main services. Native
     # projection does not run it. Restore that one stock init trigger after our
-    # /data owner claim, before any gadget/HU readiness wait. Never retry here.
+    # /data owner claim; callers choose the startup phase. Never retry here.
     [ "$QCOM_MAIN_BOOTSTRAP_ATTEMPTED" = 0 ] || return 0
     QCOM_MAIN_BOOTSTRAP_ATTEMPTED=1
     qmb_before=$(prop vendor.qcom.main.start); qmb_rc=$?
@@ -321,6 +415,20 @@ bootstrap_qcom_main_once() {
         log QCOM_MAIN_BOOTSTRAP_REQUESTED || :
     else
         log "QCOM_MAIN_BOOTSTRAP_FAILED stage=readback rc=$qmb_rc" || :
+    fi
+    return 0
+}
+bootstrap_qcom_main_if_due() {
+    # Prefer ACCESSORY_CONNECTED; do not leave radio waiting for an absent HU,
+    # gadget, media or vendor acknowledgement. Existing loops check 20 seconds
+    # after controller start. This is cooperative, not an absolute deadline:
+    # a blocked command or SIGKILL cannot be covered without another owner.
+    [ "$QCOM_MAIN_BOOTSTRAP_ATTEMPTED" = 0 ] || return 0
+    if ! number "$RUN_STARTED_MS" || ! sample_now_ms ||
+        ! number "$SAMPLED_NOW_MS" || [ "$SAMPLED_NOW_MS" -lt "$RUN_STARTED_MS" ] ||
+        [ "$SAMPLED_NOW_MS" -ge $((RUN_STARTED_MS+20000)) ]; then
+        # An unavailable/regressed clock restores the previous immediate policy.
+        bootstrap_qcom_main_once
     fi
     return 0
 }
@@ -424,6 +532,7 @@ start_md() {
     pending_pid md "$MD" || return 1
     md_deadline=$(( $(now) + 20 ))
     while [ "$(now)" -lt "$md_deadline" ]; do
+        bootstrap_qcom_main_if_due
         mc=$(b tr '\000' ' ' < "/proc/$MD/cmdline") || return 1
         if md_command_ok "$mc"; then
             mh=$(cmdhash "$MD") || return 1
@@ -439,6 +548,7 @@ wait_md_ready() {
     phase MEDIA_WAIT || return 1
     wm_last=0
     while ! stop_requested; do
+        bootstrap_qcom_main_if_due
         identity md && same_boot || return 1
         if read_md_ready; then
             # Reject immediately failing/open-close loops; not proof of host bytes.
@@ -457,7 +567,15 @@ vendor_usb_ready() {
     [ "$vu_vendor" = a600000.dwc3 ] && [ "$vu_sys" = "$vu_vendor" ] && [ "$vu_ack" = "$vu_vendor" ]
 }
 
-write_node() { timeout -k 1 3 sh -c 'printf "%s\n" "$2" > "$1"' boot-usb-write "$1" "$2"; }
+write_node() {
+    # Only this fixed printf/redirection child uses ash; the owner stays mksh.
+    # Preserve the deadline and return failures without retrying a USB write.
+    if [ -x /data/adb/magisk/busybox ]; then
+        /data/adb/magisk/busybox timeout -k 1 3 /data/adb/magisk/busybox sh -c 'printf "%s\n" "$2" > "$1"' boot-usb-write "$1" "$2"
+        return $?
+    fi
+    timeout -k 1 3 sh -c 'printf "%s\n" "$2" > "$1"' boot-usb-write "$1" "$2"
+}
 initialize_usb_gpio() {
     # Proven first-start wiring: chelianyi-led + sd_msm6350, TLMM8=1124+8.
     # The line-info cache is not the hardware direction/value. Read sysfs after
@@ -505,17 +623,29 @@ configure_discovery() {
     serial_hash=$(printf '%s' "$serial" | b sha256sum) || return 1
     atomic serial.provenance "source=ro.serialno sha256=${serial_hash%% *}" || return 1
     clear_known_links && b setprop sys.usb.configfs 2 || return 1
-    write_node "$G/idVendor" 0x18d1 && write_node "$G/idProduct" 0x4ee1 && write_node "$G/bcdDevice" 0x1001 || return 1
-    for node in bDeviceClass bDeviceSubClass bDeviceProtocol; do write_node "$G/$node" 0x00 || return 1; done
-    write_node "$G/strings/0x409/serialnumber" "$serial" && write_node "$G/strings/0x409/manufacturer" CarLife && write_node "$G/strings/0x409/product" AndroidBox || return 1
+    # One bounded child for the ten ordered writes while both gadgets are unbound.
+    # The entire batch has a 3s budget; any failed write prevents link/bind.
+    read_is "$G/UDC" '' && read_is /config/usb_gadget/g2/UDC '' || return 1
+    timeout -k 1 3 sh -c '
+        printf "%s\n" 0x18d1 > "$1/idVendor" &&
+        printf "%s\n" 0x4ee1 > "$1/idProduct" &&
+        printf "%s\n" 0x1001 > "$1/bcdDevice" &&
+        printf "%s\n" 0x00 > "$1/bDeviceClass" &&
+        printf "%s\n" 0x00 > "$1/bDeviceSubClass" &&
+        printf "%s\n" 0x00 > "$1/bDeviceProtocol" &&
+        printf "%s\n" "$2" > "$1/strings/0x409/serialnumber" &&
+        printf "%s\n" CarLife > "$1/strings/0x409/manufacturer" &&
+        printf "%s\n" AndroidBox > "$1/strings/0x409/product" &&
+        printf "%s\n" 0xc0 > "$1/configs/b.1/bmAttributes"
+    ' boot-usb-discovery "$G" "$serial" || return 1
     serial=
-    write_node "$G/configs/b.1/bmAttributes" 0xc0 && b ln -s "$G/functions/mtp.gs0" "$G/configs/b.1/f1" || return 1
+    b ln -s "$G/functions/mtp.gs0" "$G/configs/b.1/f1" || return 1
     # Last pre-bind check. External init/configfs is not a CAS; runtime logs drift.
     same_boot && oem_absent && read_md_ready && observer_ready && read_is "$G/UDC" '' || return 1
     atomic usb.intent "$RUN_ID $BOOT DISCOVERY" && log DISCOVERY_BIND_INTENT || return 1
-    discovery_bind_start_ms=$(now_ms) || discovery_bind_start_ms=unknown
+    if sample_now_ms; then discovery_bind_start_ms=$SAMPLED_NOW_MS; else discovery_bind_start_ms=unknown; fi
     write_node "$G/UDC" a600000.dwc3 || return 1
-    discovery_bind_return_ms=$(now_ms) || discovery_bind_return_ms=unknown
+    if sample_now_ms; then discovery_bind_return_ms=$SAMPLED_NOW_MS; else discovery_bind_return_ms=unknown; fi
     physical_profile mtp || return 1
     USB_OWNED=1
     phase USB_DISCOVERY "bind_start_boot_elapsed_ms=$discovery_bind_start_ms bind_return_boot_elapsed_ms=$discovery_bind_return_ms"
@@ -526,15 +656,16 @@ enter_accessory() {
     # Keep MD + native reader open through transition; first HU bytes have an owner.
     write_node "$G/UDC" '' && read_is "$G/UDC" '' && accessory_unchanged && clear_known_links || return 1
     write_node "$G/idProduct" 0x2d00 && b ln -s "$G/functions/$ACC_FUNCTION" "$G/configs/b.1/f1" || return 1
-    accessory_bind_start_ms=$(now_ms) || accessory_bind_start_ms=unknown
+    if sample_now_ms; then accessory_bind_start_ms=$SAMPLED_NOW_MS; else accessory_bind_start_ms=unknown; fi
     write_node "$G/UDC" a600000.dwc3 || return 1
-    accessory_bind_return_ms=$(now_ms) || accessory_bind_return_ms=unknown
+    if sample_now_ms; then accessory_bind_return_ms=$SAMPLED_NOW_MS; else accessory_bind_return_ms=unknown; fi
     physical_profile accessory || return 1
     USB_OWNED=1
     # The verified START already proves a host connection. Reenumeration can
     # lose it before polling observes configured; still require a full detach interval.
     DETACH_ARMED=1; DETACH_SINCE=0; ATTACH_FAILURES=0
-    phase ACCESSORY_CONNECTED "bind_start_boot_elapsed_ms=$accessory_bind_start_ms bind_return_boot_elapsed_ms=$accessory_bind_return_ms"
+    phase ACCESSORY_CONNECTED "bind_start_boot_elapsed_ms=$accessory_bind_start_ms bind_return_boot_elapsed_ms=$accessory_bind_return_ms" || return 1
+    bootstrap_qcom_main_once
 }
 recovery_reason() {
     RECOVERY_REASON=NONE
@@ -542,8 +673,9 @@ recovery_reason() {
     [ "$PHASE" = ACCESSORY_CONNECTED ] || return 0
     if identity md; then MD_EXIT_SINCE=0; return 0; fi
     child_exited md || return 1
-    [ "$MD_EXIT_SINCE" != 0 ] || MD_EXIT_SINCE=$tick
-    if [ "$tick" -ge $((MD_EXIT_SINCE+150)) ]; then RECOVERY_REASON=MD_EXIT; fi
+    # A proven exit cannot recover during a debounce interval. Rearm still
+    # requires the exact child to exit 0 and all ownership/cleanup checks.
+    RECOVERY_REASON=MD_EXIT
 }
 
 rearm_discovery() {
@@ -625,12 +757,27 @@ cleanup_groups() {
     group_empty md && group_empty observer || return 1
     [ -d "/sys/fs/cgroup$CG_PARENT" ] && [ ! -L "/sys/fs/cgroup$CG_PARENT" ] || return 1
     printf '%s\n' "$$" > "/sys/fs/cgroup$CG_PARENT/cgroup.procs" || return 1
-    for cleanup_role in md observer controller; do
+    for cleanup_role in md observer; do
         group_empty "$cleanup_role" && b rmdir "$CG/$cleanup_role" || return 1
     done
-    b rmdir "$CG" && b rmdir "$R/owner.lock"
+    # BusyBox timeout watchdogs can outlive completed applets. After migration,
+    # new readers inherit CG_PARENT; wait for old helpers, never signal them.
+    cleanup_started=$(now_cs) || return 1
+    while :; do
+        cleanup_pids=$(readf "$CG/controller/cgroup.procs") || return 1
+        [ -z "$cleanup_pids" ] && break
+        cleanup_now=$(now_cs) || return 1
+        [ "$cleanup_now" -ge "$cleanup_started" ] || return 1
+        if [ "$cleanup_now" -ge $((cleanup_started+400)) ]; then
+            printf 'CGROUP_DRAIN_TIMEOUT controller_pids=%s\n' "$cleanup_pids" >&2
+            return 1
+        fi
+        sleep .1 || return 1
+    done
+    b rmdir "$CG/controller" && b rmdir "$CG" && b rmdir "$R/owner.lock"
 }
 stop_own() {
+    bootstrap_qcom_main_once
     phase STOPPING || return 1
     stop_child md && stop_child observer || { phase STOP_FAILED_OWN_CHILD_ALIVE; return 1; }
     # Do not restore AA, unbind attached USB or change persisted selection.
@@ -660,6 +807,7 @@ start_floating_nav_once() {
 }
 
 fail() {
+    bootstrap_qcom_main_once
     log "FAIL_$1"; phase "FAULT_$1"
     stop_child md && stop_child observer || { phase FAULT_CHILD_STILL_OWNS_FD; exit 71; }
     # Own lock stays as evidence, no silent retry/AA switch/reboot loop.
@@ -688,14 +836,15 @@ if [ "$ACTION" = stop ]; then
     printf 'REFUSED=stop_timeout_no_blind_usb_restore\n' >&2; exit 71
 fi
 BOOT=$(readf /proc/sys/kernel/random/boot_id) || exit 70
-RUN_STARTED_MS=$(now_ms) || RUN_STARTED_MS=unknown
+if sample_now_ms; then RUN_STARTED_MS=$SAMPLED_NOW_MS; else RUN_STARTED_MS=unknown; fi
 PHASE_STARTED_MS=$RUN_STARTED_MS
 claim_owner || { printf 'REFUSED=owner_claim\n' >&2; exit 70; }
 trap 'STOP=1' TERM INT
 phase BOOTSTRAP || fail STATUS
-bootstrap_qcom_main_once
+bootstrap_qcom_main_if_due
 # Device boot readiness only; never sys.boot_completed / network / adbd.
 while ! stop_requested; do
+    bootstrap_qcom_main_if_due
     if [ -d "$G/functions/mtp.gs0" ] && [ -d "$G/functions/accessory.gs2" ] && [ -d "$G/configs/b.1" ] && [ -d "$G/strings/0x409" ] && [ -e /dev/usb_accessory ]; then break; fi
     phase WAIT_GADGET_DIRECTORIES || fail STATUS
     sleep 1
@@ -709,12 +858,14 @@ else read_is "$G/UDC" '' || fail UNEXPECTED_BOUND_DISCOVERY; fi
 start_md || fail MD_START
 if [ "$ADOPT" = 1 ]; then
     USB_OWNED=1; phase ACCESSORY_CONNECTED || fail STATUS
+    bootstrap_qcom_main_once
 else
     start_observer || fail OBSERVER_START
     if ! wait_md_ready; then stop_requested && { stop_own; exit $?; }; fail MD_READINESS; fi
     # Marker supplied by pinned init boot action after vendor USB setup; no OEM gate.
     phase WAIT_VENDOR_USB_ACTIONS || fail STATUS
     while ! stop_requested; do
+        bootstrap_qcom_main_if_due
         vendor_usb_ready && break
         identity md && oem_absent && read_is "$G/UDC" '' || fail UNEXPECTED_EARLY_OWNER
         sleep .25
@@ -724,6 +875,7 @@ else
     configure_discovery || fail DISCOVERY_PUBLICATION
 fi
 while ! stop_requested; do
+    bootstrap_qcom_main_if_due
     same_boot && oem_absent && read_is /config/usb_gadget/g2/UDC '' && accessory_unchanged || fail OWNER_DRIFT
     [ "$(prop sys.usb.configfs)" = 2 ] || fail CONFIGFS_OWNER_DRIFT
     udc_state=$(readf "$U/state") || fail UDC_READ

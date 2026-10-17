@@ -25,26 +25,31 @@ final class NativeMicrophone implements AutoCloseable {
     /** Invoked on our worker. The caller owns/coalesces MIC_RECORD_START/END with NativeVoice. */
     interface Demand { void changed(boolean wanted); }
     /** Verified application route only; no PCM, Binder calls or USB work here. */
-    interface RouteListener { void changed(Recorder recorder);default void communicationChanged(boolean active){} }
+    interface RouteListener { void changed(Recorder recorder);default void communicationChanged(boolean active){} default void replyChanged(boolean active){} default void focusTurn(int uid,String pkg,long turn,boolean active){} }
     private static final int RATE=16000, REMOTE_SUBMIX=25;
     private static final long ROUTE_GRACE_MS=2500, RETRY_MS=5000;
     private static final SourceLease ROUTE_LEASE=new SourceLease();
     private final Demand demand;
     private final RouteListener routeListener;
+    private final NativeVoiceFocus voiceFocus;
     private volatile Recorder verifiedRecorder;
+    private volatile Recorder lastRoutedRecorder;
     private final PcmQueue queue=new PcmQueue();
     private HandlerThread thread;
     private Handler worker;
     private AudioManager manager;
     private AudioManager.AudioRecordingCallback callback;
     private AudioManager.OnModeChangedListener modeCallback;private boolean modeRegistered;private int audioMode;
-    private Recorder suppressed;private boolean communicationActive;
+    private Recorder suppressed,failedRecorder;private boolean communicationActive,applicationReply;
+    private final Preparation preparation=new Preparation();
     private volatile boolean closed,callHold;private volatile boolean callRetired=true;
     private volatile long ingestGeneration;
     private Route route;
     private Chunk writing;
     private int writingOffset;
     private long generation, retryAfter, writtenBytes, receivedPackets, ignoredPackets, writeZeroes;
+    private long notifiedRouteEpoch,notifiedFocusTurn;
+    private long measuredEpoch,firstPacketArrival;private int measuredPackets;
     private long lastReport, firstPcm, lastPcm;
     private long pcmSamples;private double pcmEnergy;private int pcmPeak;
     private boolean wanted, callbackRegistered, poisoned;
@@ -55,7 +60,7 @@ final class NativeMicrophone implements AutoCloseable {
     private final Runnable pumpTask=new Runnable(){public void run(){pump();}};
 
     NativeMicrophone(Demand demand){this(demand,null);}
-    NativeMicrophone(Demand demand,RouteListener listener){if(demand==null)throw new NullPointerException("microphone demand");this.demand=demand;this.routeListener=listener;}
+    NativeMicrophone(Demand demand,RouteListener listener){if(demand==null)throw new NullPointerException("microphone demand");this.demand=demand;this.routeListener=listener;voiceFocus=new NativeVoiceFocus(new NativeVoiceFocus.Listener(){public void changed(int uid){if(closed)return;if(uid>=0){if(suppressed!=null&&suppressed.uid==uid&&NativeVoiceFocus.State.gated(suppressed.source,suppressed.pkg))suppressed=null;if(failedRecorder!=null&&failedRecorder.uid==uid){failedRecorder=null;retryAfter=0;}}reconcile();}public void focusTurn(int uid,String pkg,long turn,boolean active){if(!closed&&routeListener!=null)routeListener.focusTurn(uid,pkg,turn,active);}});}
 
     synchronized void start(){
         if(thread!=null||closed)return;
@@ -65,9 +70,20 @@ final class NativeMicrophone implements AutoCloseable {
 
     /** USB ingress only copies bounded data; it never writes AudioTrack or makes Binder calls. */
     void onMic(byte[] pcm,int timestamp){
-        long epoch=ingestGeneration;
-        synchronized(this){receivedPackets++;if(closed||callHold||epoch==0){ignoredPackets++;return;}}
-        queue.offer(epoch,pcm,SystemClock.uptimeMillis());
+        final long epoch=ingestGeneration;
+        final Recorder target=verifiedRecorder;
+        final long turn=target==null?0:voiceFocus.state.currentTurn(target.uid);
+        final long arrival=SystemClock.uptimeMillis();
+        final boolean valid=pcm!=null&&pcm.length>0&&pcm.length<=32000&&(pcm.length&1)==0;
+        boolean notify=false;int packetNumber=0;long arrivalDelta=0;
+        synchronized(this){receivedPackets++;if(closed||callHold||epoch==0){ignoredPackets++;return;}
+            if(valid){if(measuredEpoch!=epoch){measuredEpoch=epoch;measuredPackets=0;firstPacketArrival=arrival;}if(measuredPackets<2){packetNumber=++measuredPackets;arrivalDelta=arrival-firstPacketArrival;}}
+            if(target!=null&&turn>0&&valid&&(notifiedRouteEpoch!=epoch||notifiedFocusTurn!=turn)){notifiedRouteEpoch=epoch;notifiedFocusTurn=turn;notify=true;}}
+        queue.offer(epoch,pcm,arrival);
+        if(packetNumber!=0){boolean allZero=true;for(byte value:pcm)if(value!=0){allZero=false;break;}MdMain.logFields("native_microphone_initial_pcm","route_epoch",epoch,"packet_number",packetNumber,"length",pcm.length,"wire_timestamp",timestamp,"arrival_uptime_ms",arrival,"since_first_packet_ms",arrivalDelta,"all_zero",allZero,"raw_audio_recorded",false);}
+        Handler h=worker;if(notify&&h!=null)h.post(new Runnable(){public void run(){
+            if(!closed&&!callHold&&route!=null&&route.verified&&route.epoch==epoch&&route.target.same(target)&&ingestGeneration==epoch)voiceFocus.captureReceived(target.uid,turn,epoch);
+        }});
     }
 
     /** Fence ingress before posting cleanup; only the microphone worker can confirm retirement. */
@@ -82,11 +98,34 @@ final class NativeMicrophone implements AutoCloseable {
     List<Recorder> observedRecorders(){return new ArrayList<Recorder>(recorders);}
     /** Cancel only the actual recorder opened by a HU-owned voice request. */
     void suppressOwnedRecorder(final Recorder target){
-        Handler h=worker;if(closed||h==null||target==null)return;
-        h.post(new Runnable(){public void run(){if(closed||find(recorders,target)==null)return;suppressed=target;if(route!=null&&route.target.same(target))stopRoute();reconcile();log("hu_owned_recorder_suppressed",target.description());}});
+        suppressRecorder(target,"hu_owned_recorder_suppressed");
     }
-    void resumeOwnedRecorder(){Handler h=worker;if(!closed&&h!=null)h.post(new Runnable(){public void run(){if(closed)return;suppressed=null;refresh();}});}
-    private void routeChanged(Recorder recorder){verifiedRecorder=recorder;if(routeListener!=null)try{routeListener.changed(recorder);}catch(RuntimeException e){log("route_callback_error",cause(e));}}
+    /** MODULE_CONTROL/HARDKEY stop owns the HU microphone, even when the app
+     * opened its recorder from the screen rather than our voice-UI launcher.
+     * Keep the exact last verified identity if Android has just lost its route;
+     * a late worker task must never suppress a newer recorder session. */
+    void stopFromHeadUnit(){
+        if(closed||callHold)return;
+        Recorder target=verifiedRecorder;
+        if(target==null)target=lastRoutedRecorder;
+        if(target==null)log("hu_stop_without_route","no previously verified application recorder");
+        suppressRecorder(target,"hu_recorder_stop");
+    }
+    private void suppressRecorder(final Recorder target,final String reason){
+        Handler h=worker;if(closed||h==null)return;
+        h.post(new Runnable(){public void run(){
+            if(closed||callHold)return;
+            voiceFocus.state.explicitStop();
+            if("hu_recorder_stop".equals(reason)&&route!=null&&!route.activation.started())stopRoute();
+            if(target==null||find(recorders,target)==null){reconcile();return;}
+            if(target.same(suppressed))return;
+            suppressed=target;
+            if(route!=null&&route.target.same(target))stopRoute();
+            reconcile();log(reason,target.description()+"; no automatic retry for this active session");
+        }});
+    }
+    void resumeOwnedRecorder(){Handler h=worker;if(!closed&&h!=null)h.post(new Runnable(){public void run(){if(closed)return;if(suppressed!=null)log("hu_recorder_rearmed",suppressed.description());voiceFocus.state.explicitStart();suppressed=null;failedRecorder=null;retryAfter=0;refresh();}});}
+    private void routeChanged(Recorder recorder){verifiedRecorder=recorder;if(recorder!=null)lastRoutedRecorder=recorder;if(routeListener!=null)try{routeListener.changed(recorder);}catch(RuntimeException e){log("route_callback_error",cause(e));}}
 
     /** Useful after an explicit app/assistant launch; no microphone command is sent directly. */
     void refreshRecorders(){Handler h=worker;if(!closed&&h!=null)h.post(refreshTask);}
@@ -114,6 +153,7 @@ final class NativeMicrophone implements AutoCloseable {
             manager.addOnModeChangedListener(new java.util.concurrent.Executor(){public void execute(Runnable task){Handler h=worker;if(!closed&&h!=null)h.post(task);}},modeCallback);modeRegistered=true;
             // Register before snapshot so a call starting during initialization is seen.
             audioMode=manager.getMode();
+            voiceFocus.start(manager,worker);
             log("observer_ready","recording callback and initial snapshot; exact UID/source/session; PCM16 mono16000");
             refresh();
         }catch(Exception|LinkageError e){
@@ -149,42 +189,67 @@ final class NativeMicrophone implements AutoCloseable {
     private void reconcile(){
         if(closed||poisoned)return;
         long now=SystemClock.uptimeMillis();
+        boolean replying=voiceFocus.state.replying();
+        if(applicationReply!=replying){applicationReply=replying;if(routeListener!=null)try{routeListener.replyChanged(replying);}catch(RuntimeException e){log("reply_callback_error",cause(e));}}
         if(suppressed!=null&&find(recorders,suppressed)==null)suppressed=null;
         boolean communication=shouldYieldToCall(audioMode,null)||hasScoRecorder(recorders);
         if(communication!=communicationActive){communicationActive=communication;if(routeListener!=null)try{routeListener.communicationChanged(communication);}catch(RuntimeException e){log("call_mode_callback_error",cause(e));}log("call_audio_priority",Boolean.toString(communication));}
         if(communication||callHold){if(route!=null)stopRoute();if(callHold)callRetired=!poisoned&&!ROUTE_LEASE.isHeld();return;}
-        Recorder selected=select(recorders,suppressed,audioMode);
+        Recorder selected=select(recorders,suppressed,audioMode,voiceFocus.state);
+        if(route!=null&&!route.activation.started()){
+            Recorder same=find(recorders,route.target);
+            if(same==null||!same.eligible()||same.same(suppressed)||replying||selected!=null&&!selected.same(route.target)){
+                stopRoute();if(poisoned||closed)return;
+            }else if(selected==null){
+                if(same.onRoute(route.address)){log("prepared_route_changed_without_play",same.description());stopRoute();}
+                return;
+            }else{
+                try{route.activate(true);logRouteCreated(route);scheduleRefresh(50);}
+                catch(Exception|LinkageError e){log("route_open_error",cause(e));failedRecorder=route.target;stopRoute();retryAfter=now+RETRY_MS;scheduleRefresh(RETRY_MS);}
+                return;
+            }
+        }
+        if(route!=null&&!voiceFocus.state.permits(route.target.uid,route.target.source,route.target.pkg)){
+            log("voice_focus_released",route.target.description());stopRoute();if(poisoned||closed)return;
+        }
         if(route!=null&&selected!=null&&!selected.same(route.target)){
             log("recorder_preempted",route.target.description()+" -> "+selected.description());
             stopRoute();if(poisoned||closed)return;
         }
         if(route!=null){
             Recorder same=find(recorders,route.target);
-            if(same!=null&&same.eligible()){
+            if(same!=null&&same.eligible()&&voiceFocus.state.permits(same.uid,same.source,same.pkg)){
                 // A routing callback can change only the device; preserve the route and queue.
                 if(same.onRoute(route.address)){
                     if(!route.verified){synchronized(this){if(closed)return;route.verified=true;queue.reset(route.epoch);ingestGeneration=route.epoch;}routeChanged(same);setDemand(true);log("route_verified",same.description()+" address="+route.address);worker.post(pumpTask);}
                     return;
                 }
-                if(now-route.created<ROUTE_GRACE_MS){scheduleRefresh(100);return;}
+                if(route.activation.inGrace(now,ROUTE_GRACE_MS)){scheduleRefresh(100);return;}
                 log("route_not_applied",same.description()+" expected_address="+route.address);
-                stopRoute();retryAfter=now+RETRY_MS;scheduleRefresh(RETRY_MS);return;
+                failedRecorder=route.target;stopRoute();retryAfter=now+RETRY_MS;scheduleRefresh(RETRY_MS);return;
             }
             // During initial rerouting, AudioRecord can disappear while restoring its input.
-            if(same==null&&now-route.created<ROUTE_GRACE_MS){scheduleRefresh(100);return;}
+            if(same==null&&route.activation.inGrace(now,ROUTE_GRACE_MS)){scheduleRefresh(100);return;}
             stopRoute();
             if(poisoned||closed)return;
         }
+        boolean prepareOnly=false;
+        if(selected==null){selected=preparation.select(recorders,suppressed,voiceFocus.state,replying);prepareOnly=selected!=null;}
         if(selected==null)return;
-        if(now<retryAfter){scheduleRefresh(retryAfter-now);return;}
+        long delay=retryDelay(selected,failedRecorder,retryAfter,now);
+        if(delay>0){scheduleRefresh(delay);return;}
         try{
-            Route next=new Route(selected,++generation,now);route=next;next.open();
-            log("route_created",selected.description()+" address="+next.address+" track_buffer_frames="+next.bufferFrames+" track_capacity_frames="+next.bufferCapacityFrames+"; awaiting actual recorder route");
+            preparation.consume(selected);
+            Route next=new Route(selected,++generation);route=next;next.prepare();
+            if(prepareOnly){log("route_prepared_idle",selected.description()+" epoch="+next.epoch+"; track STOPPED; no microphone demand");scheduleRefresh(50);return;}
+            next.activate(false);logRouteCreated(next);
             // Starting the injector makes its input device available. Android may restore an
             // already-open AudioRecord; only its resulting device/address confirms rerouting.
             scheduleRefresh(50);
-        }catch(Exception|LinkageError e){log("route_open_error",cause(e));stopRoute();retryAfter=now+RETRY_MS;scheduleRefresh(RETRY_MS);}
+        }catch(Exception|LinkageError e){log("route_open_error",cause(e));failedRecorder=selected;stopRoute();retryAfter=now+RETRY_MS;scheduleRefresh(RETRY_MS);}
     }
+
+    private static void logRouteCreated(Route route){log("route_created",route.target.description()+" address="+route.address+" track_buffer_frames="+route.bufferFrames+" track_capacity_frames="+route.bufferCapacityFrames+"; awaiting actual recorder route");}
 
     private void scheduleRefresh(long delay){if(!closed){worker.removeCallbacks(refreshTask);worker.postDelayed(refreshTask,Math.max(1,delay));}}
 
@@ -212,14 +277,14 @@ final class NativeMicrophone implements AutoCloseable {
             }
             if(now-lastReport>=1000){lastReport=now;report("active");}
             if(!closed&&route==current)worker.postDelayed(pumpTask,5);
-        }catch(Exception e){log("pcm_write_error",cause(e));stopRoute();retryAfter=now+RETRY_MS;scheduleRefresh(RETRY_MS);}
+        }catch(Exception e){log("pcm_write_error",cause(e));failedRecorder=current.target;stopRoute();retryAfter=now+RETRY_MS;scheduleRefresh(RETRY_MS);}
     }
 
     private void stopRoute(){
         ingestGeneration=0;routeChanged(null);queue.reset(0);writing=null;writingOffset=0;
         if(worker!=null)worker.removeCallbacks(pumpTask);setDemand(false);
         Route old=route;route=null;
-        if(old!=null){boolean clean=old.close();if(!clean)poisoned=true;log("route_closed",old.target.description()+" cleanup="+clean);report("route_closed");}
+        if(old!=null){voiceFocus.captureEnded(old.epoch);boolean clean=old.close();if(!clean)poisoned=true;log("route_closed",old.target.description()+" cleanup="+clean);report("route_closed");}
     }
 
     private void report(String state){
@@ -234,9 +299,10 @@ final class NativeMicrophone implements AutoCloseable {
         final CountDownLatch retired=new CountDownLatch(1);
         h.removeCallbacksAndMessages(null);h.post(new Runnable(){public void run(){try{
             stopRoute();
+            voiceFocus.close();
             if(manager!=null&&callbackRegistered)try{manager.unregisterAudioRecordingCallback(callback);}catch(RuntimeException e){log("observer_close_error",cause(e));}
             if(manager!=null&&modeRegistered&&modeCallback!=null)try{manager.removeOnModeChangedListener(modeCallback);}catch(RuntimeException e){log("mode_observer_close_error",cause(e));}
-            modeRegistered=false;modeCallback=null;callbackRegistered=false;manager=null;recorders=Collections.emptyList();suppressed=null;
+            modeRegistered=false;modeCallback=null;callbackRegistered=false;manager=null;recorders=Collections.emptyList();suppressed=null;failedRecorder=null;lastRoutedRecorder=null;retryAfter=0;
         }finally{retired.countDown();if(t!=null)t.quitSafely();}}});
         if(Looper.myLooper()!=h.getLooper())try{if(!retired.await(3,TimeUnit.SECONDS))log("cleanup_timeout","microphone worker did not finish cleanup within3s");}catch(InterruptedException e){Thread.currentThread().interrupt();}
     }
@@ -250,12 +316,39 @@ final class NativeMicrophone implements AutoCloseable {
         String description(){return "uid="+uid+" source="+source+" session="+session+" package="+pkg+" device_type="+deviceType+" silenced="+silenced;}
     }
     static Recorder find(List<Recorder> list,Recorder target){for(Recorder r:list)if(r.same(target))return r;return null;}
+    /** Preparation never grants microphone admission. Reused identities keep
+     * the cold path after one turn, including Navigator's MEDIA-only follow-up. */
+    static final class Preparation {
+        private Recorder consumed;
+        // An empty callback may have waited behind our blocking route cleanup.
+        // It cannot prove this identity is new again; only another actual
+        // recorder replaces the one-field preparation history. Cold starts remain allowed.
+        void consume(Recorder recorder){if(NativeVoiceFocus.State.gated(recorder.source,recorder.pkg))consumed=recorder;}
+        Recorder select(List<Recorder> list,Recorder suppressed,NativeVoiceFocus.State focus,boolean replying){
+            if(replying)return null;Recorder latest=null;
+            for(Recorder r:list)if(r.eligible()&&NativeVoiceFocus.State.gated(r.source,r.pkg)&&r.deviceType!=REMOTE_SUBMIX&&!r.same(suppressed)&&!r.same(consumed)&&focus.currentTurn(r.uid)==0&&!focus.permits(r.uid,r.source,r.pkg)&&(latest==null||r.session>latest.session))latest=r;
+            return latest;
+        }
+    }
+    /** Grace begins at play, even after a long idle PREPARED interval. */
+    static final class Activation {
+        private long startedAt=-1;
+        void start(long now){if(startedAt>=0)throw new IllegalStateException("route already activated");startedAt=now;}
+        boolean started(){return startedAt>=0;}
+        boolean inGrace(long now,long limit){return startedAt>=0&&now>=startedAt&&now-startedAt<limit;}
+    }
+    /** A failed route may back off only its own capture identity. A new screen
+     * microphone session must not inherit another session's five-second wait. */
+    static long retryDelay(Recorder selected,Recorder failed,long until,long now){return selected!=null&&selected.same(failed)&&until>now?until-now:0;}
     static boolean shouldYieldToCall(int mode,Recorder recorder){return mode>=2&&mode<=6||recorder!=null&&recorder.deviceType==7;}
     private static boolean hasScoRecorder(List<Recorder> list){for(Recorder r:list)if(!r.silenced&&shouldYieldToCall(0,r))return true;return false;}
     static Recorder select(List<Recorder> list){return select(list,null,0);}
     static Recorder select(List<Recorder> list,Recorder suppressed,int mode){
+        return select(list,suppressed,mode,null);
+    }
+    static Recorder select(List<Recorder> list,Recorder suppressed,int mode,NativeVoiceFocus.State focus){
         if(shouldYieldToCall(mode,null)||hasScoRecorder(list))return null;
-        Recorder newest=null;for(Recorder r:list)if(r.eligible()&&!r.same(suppressed)&&(newest==null||r.session>newest.session))newest=r;return newest;
+        Recorder newest=null;for(Recorder r:list)if(r.eligible()&&!r.same(suppressed)&&(focus==null||focus.permits(r.uid,r.source,r.pkg))&&(newest==null||r.session>newest.session))newest=r;return newest;
     }
     static final class Chunk {final long epoch,created;final byte[] data;Chunk(long epoch,long created,byte[] data){this.epoch=epoch;this.created=created;this.data=data;}}
     static final class PcmQueue {
@@ -280,9 +373,10 @@ final class NativeMicrophone implements AutoCloseable {
     }
 
     private final class Route {
-        final Recorder target;final long epoch,created;Object policy,mix;Class<?> policyType;AudioTrack track;String address="";int bufferFrames,bufferCapacityFrames;boolean attempted,verified,leased;
-        Route(Recorder target,long epoch,long created){this.target=target;this.epoch=epoch;this.created=created;}
-        void open()throws Exception{
+        final Recorder target;final long epoch;final Activation activation=new Activation();Object policy,mix;Class<?> policyType;AudioTrack track;String address="";int bufferFrames,bufferCapacityFrames;boolean attempted,verified,leased;
+        Route(Recorder target,long epoch){this.target=target;this.epoch=epoch;}
+        void prepare()throws Exception{
+            long began=SystemClock.uptimeMillis();MdMain.logFields("native_microphone_stage","stage","prepare_begin","route_epoch",epoch,"uid",target.uid,"source",target.source,"session",target.session);
             ROUTE_LEASE.acquire(this,"native microphone recorder injection");leased=true;
             policyType=Class.forName("android.media.audiopolicy.AudioPolicy");
             Class<?> pb=Class.forName("android.media.audiopolicy.AudioPolicy$Builder"),mixType=Class.forName("android.media.audiopolicy.AudioMix"),mb=Class.forName("android.media.audiopolicy.AudioMix$Builder"),ruleType=Class.forName("android.media.audiopolicy.AudioMixingRule"),rb=Class.forName("android.media.audiopolicy.AudioMixingRule$Builder");
@@ -295,18 +389,24 @@ final class NativeMicrophone implements AutoCloseable {
             AudioFormat format=new AudioFormat.Builder().setSampleRate(RATE).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build();
             call(builder,"setFormat",new Class<?>[]{AudioFormat.class},format);call(builder,"setRouteFlags",new Class<?>[]{int.class},mixType.getField("ROUTE_FLAG_LOOP_BACK").getInt(null));mix=call(builder,"build",new Class<?>[0]);
             Object policyBuilder=pb.getConstructor(Context.class).newInstance(new Object[]{null});call(policyBuilder,"setLooper",new Class<?>[]{Looper.class},worker.getLooper());call(policyBuilder,"addMix",new Class<?>[]{mixType},mix);policy=call(policyBuilder,"build",new Class<?>[0]);
-            attempted=true;int status=((Integer)call(manager,"registerAudioPolicy",new Class<?>[]{policyType},policy)).intValue();if(status!=0)throw new IOException("registerAudioPolicy="+status);
+            long stage=SystemClock.uptimeMillis();attempted=true;int status=((Integer)call(manager,"registerAudioPolicy",new Class<?>[]{policyType},policy)).intValue();MdMain.logFields("native_microphone_stage","stage","register_policy","route_epoch",epoch,"duration_ms",SystemClock.uptimeMillis()-stage);if(status!=0)throw new IOException("registerAudioPolicy="+status);
             address=String.valueOf(call(mix,"getRegistration",new Class<?>[0]));
-            track=(AudioTrack)call(policy,"createAudioTrackSource",new Class<?>[]{mixType},mix);if(track==null||track.getState()!=AudioTrack.STATE_INITIALIZED)throw new IOException("microphone AudioTrack not initialized");
+            stage=SystemClock.uptimeMillis();track=(AudioTrack)call(policy,"createAudioTrackSource",new Class<?>[]{mixType},mix);MdMain.logFields("native_microphone_stage","stage","create_track","route_epoch",epoch,"duration_ms",SystemClock.uptimeMillis()-stage);if(track==null||track.getState()!=AudioTrack.STATE_INITIALIZED)throw new IOException("microphone AudioTrack not initialized");
             if(track.getSampleRate()!=RATE||track.getChannelCount()!=1||track.getAudioFormat()!=AudioFormat.ENCODING_PCM_16BIT)throw new IOException("microphone AudioTrack format mismatch");
             // Keep the framework buffer: the OEM submix mixes 1024 frames per cycle.
             // A 320-frame buffer only supplies 20 ms each 64 ms cycle and loses speech.
             bufferFrames=track.getBufferSizeInFrames();bufferCapacityFrames=track.getBufferCapacityInFrames();
+            if(track.getPlayState()!=AudioTrack.PLAYSTATE_STOPPED)throw new IOException("prepared microphone track unexpectedly playing");
+            MdMain.logFields("native_microphone_stage","stage","prepare_end","route_epoch",epoch,"duration_ms",SystemClock.uptimeMillis()-began,"track_play_state",track.getPlayState());
+        }
+        void activate(boolean reused)throws Exception{
+            long began=SystemClock.uptimeMillis();activation.start(began);MdMain.logFields("native_microphone_stage","stage","activate_begin","route_epoch",epoch,"reuse_prepared",reused);
             track.play();
+            MdMain.logFields("native_microphone_stage","stage","activate_end","route_epoch",epoch,"duration_ms",SystemClock.uptimeMillis()-began,"reuse_prepared",reused);
         }
         boolean close(){
             boolean clean=true;
-            if(track!=null){try{track.stop();track.flush();}catch(RuntimeException e){log("track_stop_error",cause(e));}try{track.release();}catch(RuntimeException e){clean=false;log("track_release_error",cause(e));}track=null;}
+            if(track!=null){if(activation.started())try{track.stop();track.flush();}catch(RuntimeException e){log("track_stop_error",cause(e));}try{track.release();}catch(RuntimeException e){clean=false;log("track_release_error",cause(e));}track=null;}
             if(attempted&&policy!=null)try{call(manager,"unregisterAudioPolicy",new Class<?>[]{policyType},policy);}catch(Exception e){clean=false;log("policy_close_error",cause(e));}
             if(leased){ROUTE_LEASE.release(this,clean);if(clean)leased=false;}
             attempted=false;policy=null;return clean;

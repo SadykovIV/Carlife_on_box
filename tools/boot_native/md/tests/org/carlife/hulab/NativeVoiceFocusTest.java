@@ -1,0 +1,67 @@
+package org.carlife.hulab;
+import java.util.Arrays;
+public final class NativeVoiceFocusTest {
+    private static int checks;
+    private static void check(boolean v,String s){checks++;if(!v)throw new AssertionError(s);}
+    public static void main(String[] args){
+        NativeVoiceFocus.State f=new NativeVoiceFocus.State();String pkg="ru.yandex.yandexnavi";
+        NativeMicrophone.Recorder idle=new NativeMicrophone.Recorder(10060,1,161,false,15,"bottom",pkg);
+        check(!f.permits(10060,1,pkg),"idle Navigator recorder is not Alice intent");
+        check(f.permits(10060,6,pkg),"other Navigator capture sources retain baseline");
+        check(f.permits(10061,1,"other.app"),"unrelated application mic does not require focus4");
+        check(f.permits(10060,1,"ru.yandex.yandexmaps"),"unmeasured Maps behavior is not assumed identical");
+        check(!f.grant(10060,pkg,"navi",3,1),"navigation ducking focus is not voice");
+        check(!f.grant(10060,pkg,"voice",4,2),"delayed focus does not admit recording");
+        check(f.grant(10060,pkg,"voice",4,1),"actual screen voice grant admits current recorder");
+        check(f.permits(10060,1,pkg),"same continuous recorder161 is permitted during focus4");
+        check(!f.permits(10061,1,pkg),"voice UID cannot authorize another UID");
+        check(NativeMicrophone.select(Arrays.asList(idle),null,0,f)==idle,"existing session reused without reopening app");
+        check(!f.grant(10060,pkg,"voice",4,1),"duplicate grant is not new user intent");
+        f.explicitStop();check(!f.permits(10060,1,pkg),"HU stop cancels current focus admission");
+        check(!f.grant(10060,pkg,"voice",4,1)&&!f.permits(10060,1,pkg),"duplicate grant cannot undo explicit stop");
+        check(f.loss(10060,"voice"),"loss0 abandonment removes voice client");
+        check(!f.permits(10060,1,pkg),"persistent recorder remains idle after abandon and routing bounce");
+        check(f.grant(10060,pkg,"voice",4,1)&&f.permits(10060,1,pkg),"next screen press admits same recorder and client after abandon");
+        f.loss(10060,"voice");f.explicitStart();check(f.permits(10060,1,pkg),"explicit HU start works if optional observer is unavailable");
+        f.explicitStop();check(!f.permits(10060,1,pkg),"explicit stop releases fallback intent");
+        f.grant(10060,pkg,"voice",4,1);check(!f.loss(10060,"navi")&&f.permits(10060,1,pkg),"different focus client does not end voice");
+        f.clear();check(!f.permits(10060,1,pkg),"close resets every voice lease");
+        f.grant(10060,pkg,"voice",4,1);
+        check(!f.media(new java.util.HashSet<Integer>(Arrays.asList(10067)))&&f.permits(10060,1,pkg),"Yandex Music UID cannot turn Navigator listening into reply");
+        java.util.Set<Integer> naviMedia=new java.util.HashSet<Integer>(Arrays.asList(10060));
+        java.util.Set<Integer> silence=java.util.Collections.<Integer>emptySet();
+        long turn=f.currentTurn(10060);
+        check(!f.media(naviMedia)&&!f.replying()&&f.permits(10060,1,pkg),"startup MEDIA before verified microphone PCM does not close the route");
+        check(!f.media(naviMedia)&&f.permits(10060,1,pkg),"delayed startup callback after route creation but before PCM is still startup");
+        check(f.captureReceived(10060,turn,1),"valid PCM including silence admits the current focus and route epoch");
+        check(!f.replying()&&f.permits(10060,1,pkg),"first PCM does not reinterpret an already playing startup chime as reply");
+        check(!f.media(naviMedia)&&f.permits(10060,1,pkg),"ongoing startup player is not a new rising edge after readiness");
+        check(!f.media(silence)&&f.permits(10060,1,pkg),"startup ends without teardown or reopening the input route");
+        check(f.media(naviMedia)&&f.replying(),"new Navigator MEDIA edge after listening is the reply phase");
+        check(!f.permits(10060,1,pkg),"persistent recorder does not keep HU mic and VR active over its MEDIA answer");
+        check(f.permits(10061,1,"other.app"),"reply gating leaves other app microphones unchanged");
+        f.captureEnded(1);check(f.replying(),"closing the microphone route does not cancel latched response playback");
+        check(f.media(silence)&&!f.replying()&&f.permits(10060,1,pkg),"same focus and recorder may listen again after response playback ends");
+        check(!f.captureReceived(10060,turn,1),"late PCM task for a retired route epoch cannot arm the next listening phase");
+        check(!f.media(naviMedia)&&!f.replying(),"next playback before next input readiness cannot inherit the previous route's admission");
+        f.media(silence);check(f.captureReceived(10060,turn,2),"reused recorder can confirm the new input route in the same focus turn");
+        check(f.media(naviMedia)&&f.replying(),"second real response works after current route PCM");
+        f.captureEnded(2);f.loss(10060,"voice");
+        check(!f.replying()&&!f.permits(10060,1,pkg),"focus abandonment releases response and listening without rearming background mic");
+        check(!f.media(naviMedia)&&!f.replying(),"Navigator MEDIA without voice focus is not an assistant turn");
+        f.grant(10060,pkg,"voice",4,1);long nextTurn=f.currentTurn(10060);
+        check(nextTurn>turn&&!f.captureReceived(10060,turn,3),"old focus turn's queued PCM cannot arm a fresh voice request");
+        check(!f.captureReceived(10061,nextTurn,3),"another UID cannot arm Navigator's reply phase");
+        f.media(silence);check(f.captureReceived(10060,nextTurn,3),"current focus and current route may listen with reused recording session");
+        check(f.media(naviMedia)&&f.replying(),"response detection also works when no startup sound played");
+        f.explicitStart();
+        check(!f.replying()&&f.permits(10060,1,pkg),"explicit HU START interrupts an existing reply without waiting for MEDIA idle");
+        check(!f.captureReceived(10060,nextTurn,3),"old reply route PCM cannot arm the explicitly restarted input");
+        check(!f.media(naviMedia)&&f.permits(10060,1,pkg),"ongoing answer callback cannot undo the new HU START");
+        check(f.captureReceived(10060,nextTurn,4),"new listening route accepts valid PCM after explicit restart");
+        check(!f.media(naviMedia)&&!f.replying(),"first new PCM does not reinterpret still-playing answer as a new reply");
+        f.media(silence);check(f.media(naviMedia)&&f.replying(),"later MEDIA rising edge can answer the explicitly restarted listening phase");
+        f.explicitStop();check(!f.permits(10060,1,pkg),"HU STOP still cancels admission after explicit restart");
+        System.out.println("NativeVoiceFocusTest PASS "+checks+" checks; passive callback/API behavior verified separately on Android");
+    }
+}

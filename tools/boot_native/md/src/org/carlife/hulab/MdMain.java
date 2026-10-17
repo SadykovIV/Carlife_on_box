@@ -299,6 +299,7 @@ public final class MdMain {
         MediaCodecDisplaySource.Selection codecSelection;ProjectionGeometry geometry;
         volatile PendingVideoInit pendingInit;
         NativeVideoConfig videoConfig;
+        int videoHintWidth,videoHintHeight,videoHintFps;
         volatile String videoSettingsStatus;
         String videoSettingsReason="";
         Thread writer,captureThread;boolean version=false,paused=false;volatile boolean initialized=false;int width=1280,height=720;long bytes=0,chunks=0,nativeLogicalSession=1;long touchCount=0,touchRecoveries=0,nativeTouchIngressUptime;int touchDiagnosticSamples=0,unknownTouchDiagnosticSamples=0,touchOrdinaryIngress=0,touchPriorityIngress=0,lastTouchShape=-1;
@@ -477,6 +478,15 @@ public final class MdMain {
                 if(assistantHuStopped||!playback.assistantActive()){if(assistantAttempted||assistant.active()){assistant.stop();assistantAttempted=false;}}
                 else if(!assistantAttempted&&assistant.retired())assistantAttempted=assistant.start();
             }
+            // Keep only the native split MEDIA capture ready; actual playback
+            // owns INIT/DATA. Explicit HU mute, calls, RESET and close still use
+            // the existing hard stop and source-retirement gates.
+            if(splitAudio&&nativeCompatibility()){
+                if(audioHuMuted||audioBluetooth)return;
+                if(!audioAttempted&&audio.retired())audioAttempted=audio.startWarm();
+                audio.setPlaybackActive(mediaPlaybackActive());
+                return;
+            }
             // Wait for the first snapshot; a known idle player must not seize
             // the HU media source with INIT/silent PCM. An unavailable optional
             // observer explicitly reports outputActive=true for basic fallback.
@@ -593,17 +603,17 @@ public final class MdMain {
         }
         byte[] currentModules()throws IOException{NativeServices s=services;return NativeSessionProtocol.initialModules(speechWireActive||routeNavigationActive,callMediaWireActive||audioWireActive&&!audioHuMuted&&!audioBluetooth&&mediaPlaybackActive(),(s!=null&&s.voiceActive())||assistantAnnounced||assistantWireActive);}
         void writeLoop(){boolean preferAudio=true;CarLifeAudio.Item deferredSound=null;try{while(open){
-            updateRouteStatus();NativeServices serviceOwner=null;
-            Packet p=controls.poll();boolean video=false;CarLifeAudio.Item sound=null;
+            updateRouteStatus();NativeServices serviceOwner=null;NativeServices.Output serviceUpdate=null;
+            Packet p=controls.poll();boolean video=false;Boolean writtenVrStatus=null;NativeServices vrStatusOwner=null;CarLifeAudio.Item sound=null;
             MusicStatus music=null,navi=null,vr=null;
-            if(p!=null&&p.initialStatus){synchronized(audio.queue){p=new Packet(packet(CMD,0x10026,currentModules(),0),-1);navi=new MusicStatus(audio.queue.epoch(),speechWireActive||routeNavigationActive);}}
+            if(p!=null&&p.initialStatus){synchronized(audio.queue){vrStatusOwner=services;writtenVrStatus=(vrStatusOwner!=null&&vrStatusOwner.voiceActive())||assistantAnnounced||assistantWireActive;p=new Packet(packet(CMD,0x10026,NativeSessionProtocol.initialModules(speechWireActive||routeNavigationActive,callMediaWireActive||audioWireActive&&!audioHuMuted&&!audioBluetooth&&mediaPlaybackActive(),writtenVrStatus),0),-1);navi=new MusicStatus(audio.queue.epoch(),speechWireActive||routeNavigationActive);}}
             if(p==null){synchronized(audio.queue){music=pendingMusicStatus;pendingMusicStatus=null;}
                 if(music!=null){if(music.epoch!=audio.queue.epoch())continue;p=new Packet(packet(CMD,0x10026,CarLifeAudio.musicStatus(music.active),0),-1);}}
             if(p==null){synchronized(audio.queue){navi=pendingNaviStatus;pendingNaviStatus=null;}
                 if(navi!=null){if(navi.epoch!=audio.queue.epoch())continue;p=new Packet(packet(CMD,0x10026,moduleStatus(2,navi.active),0),-1);}}
             if(p==null){synchronized(audio.queue){vr=pendingVrStatus;pendingVrStatus=null;}
-                if(vr!=null){if(vr.epoch!=audio.queue.epoch())continue;p=new Packet(packet(CMD,0x10026,moduleStatus(4,vr.active),0),-1);}}
-            if(p==null){serviceOwner=services;NativeServices.Output update=serviceOwner==null?null:serviceOwner.poll();if(update!=null)p=new Packet(packet(CMD,update.id,update.payload,0),-1);else serviceOwner=null;}
+                if(vr!=null){if(vr.epoch!=audio.queue.epoch())continue;writtenVrStatus=vr.active;vrStatusOwner=services;p=new Packet(packet(CMD,0x10026,moduleStatus(4,vr.active),0),-1);}}
+            if(p==null){serviceOwner=services;serviceUpdate=serviceOwner==null?null:serviceOwner.poll();if(serviceUpdate!=null)p=new Packet(packet(CMD,serviceUpdate.id,serviceUpdate.payload,0),-1);else serviceOwner=null;}
             if(p==null){
                 if(deferredSound!=null){sound=deferredSound;deferredSound=null;}
                 else if(preferAudio)sound=pollAudio(SystemClock.uptimeMillis());
@@ -645,6 +655,8 @@ public final class MdMain {
             writingPacket=p;writingSince=SystemClock.uptimeMillis();VideoRateControl rateAtWrite=videoRate;long writeStartedNs=System.nanoTime();transport.writePacket(p.data);
             rateAtWrite.onWrite(video?Math.max(0,p.data.length-20):0,Math.max(0,System.nanoTime()-writeStartedNs),SystemClock.uptimeMillis());
             long ended=SystemClock.uptimeMillis();lastSocketWriteDurationMs=ended-writingSince;lastSocketWriteUptime=ended;socketWrittenPackets++;socketWrittenBytes+=p.data.length;if(video)socketWrittenVideoPackets++;writingSince=0;writingPacket=null;
+            if(serviceOwner!=null&&serviceOwner==services)serviceOwner.outputWritten(serviceUpdate,ended);
+            if(writtenVrStatus!=null&&vrStatusOwner!=null&&vrStatusOwner==services)vrStatusOwner.voiceStatusWritten(writtenVrStatus,ended);
             if(sound!=null)audioWritten(sound);
             if(navi!=null&&navi.epoch==audio.queue.epoch())naviWireActive=navi.active;
             adaptVideo(ended);
@@ -752,7 +764,11 @@ public final class MdMain {
                 }
                 if(!version)throw new IOException("version required");
                 if(nativeCompatibility()&&id==0x18028&&Proto.number(fields,1,-1)==4){
-                    int requested=Proto.number(fields,2,-1);if(requested==0)explicitAssistantStop();else if(requested==1)explicitAssistantStart();
+                    int requested=Proto.number(fields,2,-1);NativeServices voiceServices=services;
+                    if(voiceServices!=null&&voiceServices.voiceControlEcho(requested,SystemClock.uptimeMillis())){
+                        logFields("native_voice_control_echo","session_id",sessionId,"module",4,"status",requested,"action","ignore echo of recently written matching VR status; hardkey unaffected");return;
+                    }
+                    if(requested==0)explicitAssistantStop();else if(requested==1)explicitAssistantStart();
                 }
                 NativeServices nativeServices=services;
                 if(nativeServices!=null){
@@ -851,16 +867,30 @@ public final class MdMain {
         }
         synchronized NativeVideoConfig acceptVideoConfig(PendingVideoInit ticket,NativeVideoConfig observed)throws IOException{
             if(!ticket.current(pendingInit,videoGeneration,open))return null;
-            if(videoConfig==null)videoConfig=observed.override(explicitVideoMode?nativeVideoMode:null,explicitVideoFps?nativeVideoFps:null);
+            if(videoConfig==null)videoConfig=bootNative?observed.bootDefaults(explicitVideoMode?nativeVideoMode:null,explicitVideoFps?nativeVideoFps:null):observed.override(explicitVideoMode?nativeVideoMode:null,explicitVideoFps?nativeVideoFps:null);
             return videoConfig;
         }
+        boolean reloadVideoConfigIfChanged(NativeVideoConfig observed)throws IOException{
+            String before,after;
+            synchronized(this){
+                if(!bootNative||!transport.isNativeUsb()||!open||videoConfig==null)return false;
+                NativeVideoConfig next=bootNative?observed.bootDefaults(explicitVideoMode?nativeVideoMode:null,explicitVideoFps?nativeVideoFps:null):observed.override(explicitVideoMode?nativeVideoMode:null,explicitVideoFps?nativeVideoFps:null);
+                before=videoConfig.encoded();after=next.encoded();
+                if(before.equals(after))return false;
+                videoSettingsStatus="Reconnecting CarLife to apply "+after;
+            }
+            logFields("video_settings_changed","session_id",sessionId,"previous_configuration",before,"saved_configuration",after,"action","clean owner retirement; existing supervisor performs fresh discovery/handshake","reset_semantics_unchanged",true);
+            // Never hold the session monitor while joining encoder/audio cleanup.
+            close("video_settings_changed");return true;
+        }
         void updateVideoSettingsStatus(){
-            if(videoConfig!=null)videoSettingsStatus=videoConfig.status(width,height,acceptedFps)+videoSettingsReason;
+            if(videoConfig!=null)videoSettingsStatus=videoConfig.status(width,height,acceptedFps)+videoSettingsReason+"; hu_request="+videoHintWidth+"x"+videoHintHeight+" @ "+videoHintFps+" FPS; android_source="+displayWidth+"x"+displayHeight;
         }
         synchronized void completeBootInit(PendingVideoInit ticket,MediaCodecDisplaySource.Selection selection)throws IOException{
             if(!ticket.current(pendingInit,videoGeneration,open)){log("boot_stale_init_discarded","RESET/EOF/new VERSION canceled capability probe");return;}
             if(selection==null)throw new IOException("missing validated MediaCodec selection");
             geometry=selection.geometry;
+            videoHintWidth=ticket.hintWidth;videoHintHeight=ticket.hintHeight;videoHintFps=ticket.hintFps;
             if(videoConfig!=null&&videoConfig.mode.equals("auto")&&(selection.width!=ticket.hintWidth||selection.height!=ticket.hintHeight))
                 videoSettingsReason="; fallback: HU geometry invalid or unavailable on encoder";
             codecSelection=selection;sink.cancel();width=selection.width;height=selection.height;acceptedFps=selection.fps;initialized=true;pendingInit=null;updateVideoSettingsStatus();
